@@ -4,6 +4,10 @@ All notable changes contributed via pull request are documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- The Quick Start guide reopened every run. Dismissing the welcome dialog triggered two handlers: one in `guide.js` that checks whether the guide has already been seen, and one inline in `index.html` that showed it unconditionally. The inline handler now only closes the welcome dialog, leaving `guide.js` as the single place that decides.
+
 ### Added
 
 - Active file management (Settings > Active File Management) — an opt-in mode that turns Printventory from a passive index into a file manager. Downloads dropped into an ingestion folder are moved into the library automatically, filed under a folder pattern built from the metadata Printventory can read from them.

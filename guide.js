@@ -250,24 +250,38 @@ document.addEventListener("DOMContentLoaded", () => {
     });
   }
   
-  // After the welcome dialog is dismissed, automatically show the guide.
+  /**
+   * Show the guide the first time only, and remember that it has been shown.
+   *
+   * This is the single place that decides. On a read or write failure the guide is
+   * skipped rather than shown, because a guide that cannot record having appeared is
+   * a guide that appears every time.
+   */
+  async function showQuickStartGuideOnce() {
+    try {
+      const hasSeenQuickStartGuide = await window.electron.getSetting("hasSeenQuickStartGuide");
+      if (hasSeenQuickStartGuide) {
+        return false;
+      }
+      await window.electron.saveSetting("hasSeenQuickStartGuide", "true");
+    } catch (error) {
+      console.warn("Unable to read/save hasSeenQuickStartGuide setting:", error);
+      return false;
+    }
+
+    // Give a small delay so the welcome dialog can close.
+    setTimeout(() => {
+      showGuide();
+    }, 500);
+    return true;
+  }
+  window.showQuickStartGuideOnce = showQuickStartGuideOnce;
+
+  // After the welcome dialog is dismissed, show the guide — but only ever once.
   const dismissWelcomeButton = document.getElementById("dismiss-welcome");
   if (dismissWelcomeButton) {
-    dismissWelcomeButton.addEventListener("click", async () => {
-      try {
-        const hasSeenQuickStartGuide = await window.electron.getSetting("hasSeenQuickStartGuide");
-        if (hasSeenQuickStartGuide) {
-          return;
-        }
-        await window.electron.saveSetting("hasSeenQuickStartGuide", "true");
-      } catch (error) {
-        console.warn("Unable to read/save hasSeenQuickStartGuide setting:", error);
-      }
-
-      // Give a small delay so the welcome dialog can close.
-      setTimeout(() => {
-        showGuide();
-      }, 500);
+    dismissWelcomeButton.addEventListener("click", () => {
+      showQuickStartGuideOnce();
     });
   }
 });

@@ -1746,9 +1746,8 @@ docker run -d --name printventory-server -p 5000:5000 -v printventory-data:/root
     document.getElementById('dismiss-welcome')?.addEventListener('click', () => {
       const welcomeDialog = document.getElementById('welcome-message');
       welcomeDialog.close();
-      setTimeout(() => {
-        showGuide();
-      }, 500);
+      // Opening the guide is guide.js's job: it only does so the first time, and
+      // showing it from here as well ignored that and reopened it on every run.
     });
   </script>
 </body>
