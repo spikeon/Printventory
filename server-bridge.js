@@ -511,6 +511,12 @@
     'saveModelTags': 'save-model-tags',
     'getSetting': 'get-setting',
     'saveSetting': 'save-setting',
+    'getIngestSettings': 'get-ingest-settings',
+    'runIngest': 'run-ingest',
+    'applyIngestMetadata': 'apply-ingest-metadata',
+    'restartIngestAutoRun': 'restart-ingest-auto-run',
+    'reorganizeLibrary': 'reorganize-library',
+    'previewFolderPattern': 'preview-folder-pattern',
     'getAppVersion': 'get-app-version',
     'checkCollectUsage': 'check-collect-usage',
     'purgeThumbnails': 'purge-thumbnails',
@@ -683,6 +689,27 @@
   
   window.electron.onOpenSTLHome = function(callback) {
     window.electron.on('open-stl-home', callback);
+  };
+
+  window.electron.onOpenActiveFileManagement = function(callback) {
+    window.electron.on('open-active-file-management', callback);
+  };
+
+  window.electron.onIngestProgress = function(callback) {
+    window.electron.on('ingest-progress', callback);
+  };
+
+  window.electron.onIngestCompleted = function(callback) {
+    window.electron.on('ingest-completed', callback);
+  };
+
+  window.electron.onLibraryReorganized = function(callback) {
+    window.electron.on('library-reorganized', callback);
+  };
+
+  // Server mode has no native folder picker; the dialog keeps its inputs editable instead.
+  window.electron.chooseIngestFolder = function() {
+    return Promise.resolve(null);
   };
   
   window.electron.onOpenSlicerSettings = function(callback) {

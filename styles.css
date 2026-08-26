@@ -7358,3 +7358,91 @@ header {
   margin-right: 4px;
   opacity: 0.85;
 }
+/* ---------------------------------------------------------------------------
+   Active File Management (ingestion) dialog
+   --------------------------------------------------------------------------- */
+#active-file-management-dialog {
+  max-width: 46rem;
+  text-align: left;
+}
+
+#active-file-management-dialog .settings-group {
+  margin-bottom: 1rem;
+}
+
+/* Folder rows: label on its own line, then the path and its buttons side by side */
+#active-file-management-dialog .afm-dir-row {
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
+  flex-wrap: wrap;
+}
+#active-file-management-dialog .afm-dir-row label {
+  flex-basis: 100%;
+  margin-bottom: 4px;
+}
+#active-file-management-dialog .afm-dir-row input[type="text"] {
+  flex: 1;
+  min-width: 12rem;
+}
+#active-file-management-dialog .afm-dir-buttons {
+  display: flex;
+  gap: 0.5rem;
+  flex-shrink: 0;
+}
+#active-file-management-dialog .afm-dir-buttons .primary-button,
+#active-file-management-dialog .afm-dir-buttons .secondary-button {
+  padding: 6px 14px;
+  font-size: 13px;
+  white-space: nowrap;
+}
+
+#active-file-management-dialog #afm-status {
+  min-height: 1.2em;
+  margin-top: 0.5rem;
+}
+
+/* Run report: one row per project, scrollable so a big inbox cannot grow the dialog */
+.afm-results {
+  max-height: 16rem;
+  overflow: auto;
+  margin-top: 0.5rem;
+}
+.afm-results-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.85em;
+}
+.afm-results-table th,
+.afm-results-table td {
+  text-align: left;
+  padding: 4px 8px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+  vertical-align: top;
+  word-break: break-word;
+}
+.afm-results-table th {
+  position: sticky;
+  top: 0;
+  background: rgba(0, 0, 0, 0.4);
+}
+.afm-row-moved td:nth-child(2) { color: #6fcf97; }
+.afm-row-planned td:nth-child(2) { color: #f2c94c; }
+.afm-row-skipped td:nth-child(2) { color: rgba(255, 255, 255, 0.6); }
+.afm-row-failed td:nth-child(2) { color: #eb5757; }
+
+/* Folder pattern field: monospace so the tokens and slashes are legible */
+#active-file-management-dialog .afm-pattern-input {
+  width: 100%;
+  font-family: ui-monospace, "Cascadia Code", "Consolas", monospace;
+}
+#active-file-management-dialog .setting-description code {
+  font-family: ui-monospace, "Cascadia Code", "Consolas", monospace;
+  background: rgba(255, 255, 255, 0.08);
+  padding: 1px 5px;
+  border-radius: 4px;
+}
+#active-file-management-dialog .afm-pattern-preview {
+  font-family: ui-monospace, "Cascadia Code", "Consolas", monospace;
+  min-height: 1.2em;
+}

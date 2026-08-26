@@ -4920,6 +4920,280 @@ window.openSTLHomeDialog = async function() {
   stlHomeDialog.showModal();
 };
 
+// ---------------------------------------------------------------------------
+// Active file management (ingestion) dialog
+//
+// Passive Printventory indexes files where they sit. With this enabled the app
+// files them for you: whole projects (and extracted ZIPs) are moved out of the
+// ingestion folder into the library under a metadata-derived folder structure.
+// ---------------------------------------------------------------------------
+
+const AFM_DEFAULT_PATTERN = '/(%author%|Unknown Designer)/%name%/';
+let afmPatternAtOpen = AFM_DEFAULT_PATTERN;
+
+function afmEl(id) {
+  return document.getElementById(id);
+}
+
+function updateActiveFileManagementGrayed() {
+  const enabled = afmEl('afm-enabled')?.checked;
+  const options = afmEl('afm-options');
+  if (options) options.classList.toggle('grayed', !enabled);
+}
+window.updateActiveFileManagementGrayed = updateActiveFileManagementGrayed;
+
+function afmSetStatus(text) {
+  const status = afmEl('afm-status');
+  if (status) status.textContent = text || '';
+}
+
+function afmEscape(value) {
+  return String(value == null ? '' : value)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+
+/** Render one ingest run as a per-project table so nothing about a move is hidden. */
+function afmRenderResults(summary) {
+  const container = afmEl('afm-results');
+  if (!container) return;
+  if (!summary || !Array.isArray(summary.results) || summary.results.length === 0) {
+    container.innerHTML = '<p class="setting-description">Nothing in the ingestion folder to file.</p>';
+    return;
+  }
+  const rows = summary.results.map((result) => {
+    const destination = result.destination || '';
+    const detail = result.status === 'failed' || result.status === 'skipped'
+      ? (result.reason || '')
+      : destination;
+    const designer = result.metadata && result.metadata.designer ? result.metadata.designer : '';
+    return `
+      <tr class="afm-row afm-row-${afmEscape(result.status)}">
+        <td>${afmEscape(result.name)}</td>
+        <td>${afmEscape(result.status)}</td>
+        <td>${afmEscape(designer)}</td>
+        <td>${result.modelCount || 0}</td>
+        <td>${afmEscape(detail)}</td>
+      </tr>`;
+  }).join('');
+  container.innerHTML = `
+    <table class="afm-results-table">
+      <thead>
+        <tr><th>Item</th><th>Result</th><th>Designer</th><th>Models</th><th>Destination / reason</th></tr>
+      </thead>
+      <tbody>${rows}</tbody>
+    </table>`;
+}
+
+/** Persist every field in the dialog. Returns the values that were saved. */
+async function afmSaveSettings() {
+  const enabled = afmEl('afm-enabled')?.checked ? '1' : '0';
+  const ingestDirectory = (afmEl('afm-ingest-directory')?.value || '').trim();
+  const destinationRoot = (afmEl('afm-destination-root')?.value || '').trim();
+  const pattern = (afmEl('afm-pattern')?.value || '').trim() || AFM_DEFAULT_PATTERN;
+  const onConflict = afmEl('afm-on-conflict')?.value || 'suffix';
+  const extractZips = afmEl('afm-extract-zips')?.checked ? '1' : '0';
+  const deleteZip = afmEl('afm-delete-zip')?.checked ? '1' : '0';
+  const autoRunRaw = parseInt(afmEl('afm-auto-run-minutes')?.value, 10);
+  const autoRunMinutes = Number.isFinite(autoRunRaw) && autoRunRaw > 0 ? String(Math.min(autoRunRaw, 1440)) : '0';
+
+  await window.electron.saveSetting('activeFileManagementEnabled', enabled);
+  await window.electron.saveSetting('ingestDirectory', ingestDirectory);
+  await window.electron.saveSetting('ingestDestinationRoot', destinationRoot);
+  await window.electron.saveSetting('ingestFolderPattern', pattern);
+  await window.electron.saveSetting('ingestOnConflict', onConflict);
+  await window.electron.saveSetting('ingestExtractZips', extractZips);
+  await window.electron.saveSetting('ingestDeleteZipAfterExtract', deleteZip);
+  await window.electron.saveSetting('ingestAutoRunMinutes', autoRunMinutes);
+
+  if (typeof window.electron.restartIngestAutoRun === 'function') {
+    await window.electron.restartIngestAutoRun().catch(() => {});
+  }
+  return { enabled: enabled === '1', ingestDirectory, destinationRoot, pattern };
+}
+
+window.saveActiveFileManagementFromDialog = async function saveActiveFileManagementFromDialog() {
+  try {
+    const saved = await afmSaveSettings();
+    if (saved.enabled && !saved.ingestDirectory) {
+      await window.electron.showMessage('Active File Management', 'Choose an ingestion folder before turning this on.');
+      return;
+    }
+    // A different pattern means everything already filed now belongs somewhere else.
+    if (saved.enabled && saved.pattern !== afmPatternAtOpen && typeof window.electron.reorganizeLibrary === 'function') {
+      afmPatternAtOpen = saved.pattern;
+      window.electron.reorganizeLibrary().catch((error) => {
+        console.error('[Active File Management] Library re-file failed:', error);
+      });
+    }
+    afmEl('active-file-management-dialog')?.close();
+  } catch (error) {
+    console.error('[Active File Management] Save failed:', error);
+    await window.electron.showMessage('Active File Management', 'Failed to save: ' + (error.message || String(error)));
+  }
+};
+
+/** Re-index the library after a real run so the moved files show up where they now live. */
+async function afmReindexAfterRun(summary) {
+  const destinations = summary.results
+    .filter((result) => result.status === 'moved' && result.destination)
+    .map((result) => result.destination);
+  if (destinations.length === 0) return;
+
+  const destinationRoot = summary.destinationRoot;
+  try {
+    if (destinationRoot && typeof window.performSTLHomeScan === 'function') {
+      await window.performSTLHomeScan(destinationRoot);
+    }
+    if (typeof window.electron.applyIngestMetadata === 'function') {
+      await window.electron.applyIngestMetadata(summary.results);
+    }
+  } catch (error) {
+    console.error('[Active File Management] Re-index after ingest failed:', error);
+  }
+}
+
+async function afmRun(dryRun) {
+  const runButton = afmEl('afm-run');
+  const previewButton = afmEl('afm-preview');
+  if (runButton) runButton.disabled = true;
+  if (previewButton) previewButton.disabled = true;
+  afmSetStatus(dryRun ? 'Previewing…' : 'Filing…');
+  try {
+    await afmSaveSettings();
+    const summary = await window.electron.runIngest({ dryRun: !!dryRun });
+    afmRenderResults(summary);
+    if (dryRun) {
+      afmSetStatus(`Preview: ${summary.results.length} item(s) examined, ${summary.skipped} would be skipped. Nothing has been moved.`);
+    } else {
+      afmSetStatus(`Filed ${summary.moved} project(s); ${summary.skipped} skipped, ${summary.failed} failed.`);
+      await afmReindexAfterRun(summary);
+    }
+  } catch (error) {
+    console.error('[Active File Management] Run failed:', error);
+    afmSetStatus('Failed: ' + (error.message || String(error)));
+  } finally {
+    if (runButton) runButton.disabled = false;
+    if (previewButton) previewButton.disabled = false;
+  }
+}
+
+let afmPatternPreviewTimer = null;
+
+/** Show what the current pattern produces, with and without metadata to work from. */
+async function afmUpdatePatternPreview() {
+  const target = afmEl('afm-pattern-preview');
+  if (!target) return;
+  const pattern = (afmEl('afm-pattern')?.value || '').trim() || AFM_DEFAULT_PATTERN;
+  if (typeof window.electron.previewFolderPattern !== 'function') return;
+  try {
+    const preview = await window.electron.previewFolderPattern(pattern);
+    target.textContent = `With metadata: ${preview.withMetadata || '(nothing)'}   ·   Without: ${preview.withoutMetadata || '(nothing)'}`;
+  } catch (error) {
+    target.textContent = 'That pattern could not be read.';
+  }
+}
+
+function afmBindDialogOnce() {
+  const dialog = afmEl('active-file-management-dialog');
+  if (!dialog || dialog.dataset.afmBound === '1') return;
+  dialog.dataset.afmBound = '1';
+
+  afmEl('afm-enabled')?.addEventListener('change', updateActiveFileManagementGrayed);
+
+  const pickFolder = async (inputId) => {
+    if (typeof window.electron.chooseIngestFolder !== 'function') return;
+    const chosen = await window.electron.chooseIngestFolder();
+    if (chosen) {
+      const input = afmEl(inputId);
+      if (input) input.value = chosen;
+    }
+  };
+  afmEl('afm-choose-ingest')?.addEventListener('click', () => pickFolder('afm-ingest-directory'));
+  afmEl('afm-choose-destination')?.addEventListener('click', () => pickFolder('afm-destination-root'));
+  afmEl('afm-clear-ingest')?.addEventListener('click', () => {
+    const input = afmEl('afm-ingest-directory');
+    if (input) input.value = '';
+  });
+  afmEl('afm-clear-destination')?.addEventListener('click', () => {
+    const input = afmEl('afm-destination-root');
+    if (input) input.value = '';
+  });
+  afmEl('afm-pattern')?.addEventListener('input', () => {
+    if (afmPatternPreviewTimer) clearTimeout(afmPatternPreviewTimer);
+    afmPatternPreviewTimer = setTimeout(() => afmUpdatePatternPreview(), 250);
+  });
+  afmEl('afm-preview')?.addEventListener('click', () => afmRun(true));
+  afmEl('afm-run')?.addEventListener('click', () => afmRun(false));
+}
+
+window.openActiveFileManagementDialog = async function openActiveFileManagementDialog() {
+  const dialog = afmEl('active-file-management-dialog');
+  if (!dialog) return;
+  afmBindDialogOnce();
+
+  let settings = null;
+  try {
+    settings = await window.electron.getIngestSettings();
+  } catch (error) {
+    console.error('[Active File Management] Could not load settings:', error);
+  }
+  settings = settings || {};
+
+  const enabledEl = afmEl('afm-enabled');
+  if (enabledEl) enabledEl.checked = !!settings.enabled;
+
+  const ingestEl = afmEl('afm-ingest-directory');
+  if (ingestEl) ingestEl.value = settings.ingestDirectory || '';
+
+  const destinationEl = afmEl('afm-destination-root');
+  if (destinationEl) {
+    destinationEl.value = settings.destinationRootExplicit || '';
+    destinationEl.placeholder = settings.stlHome
+      ? `Defaults to STL Home (${settings.stlHome})`
+      : 'Defaults to STL Home — none set yet';
+  }
+
+  const patternEl = afmEl('afm-pattern');
+  afmPatternAtOpen = settings.pattern || AFM_DEFAULT_PATTERN;
+  if (patternEl) patternEl.value = afmPatternAtOpen;
+  await afmUpdatePatternPreview();
+
+  const conflictEl = afmEl('afm-on-conflict');
+  if (conflictEl) conflictEl.value = settings.onConflict || 'suffix';
+
+  const extractEl = afmEl('afm-extract-zips');
+  if (extractEl) extractEl.checked = settings.extractZips !== false;
+
+  const deleteZipEl = afmEl('afm-delete-zip');
+  if (deleteZipEl) deleteZipEl.checked = settings.deleteZipAfterExtract !== false;
+
+  const autoRunEl = afmEl('afm-auto-run-minutes');
+  if (autoRunEl) autoRunEl.value = String(settings.autoRunMinutes || 0);
+
+  // Server mode has no native folder picker, so the paths are typed instead.
+  const serverMode = await window.electron.isServerMode().catch(() => false);
+  for (const [inputId, buttonId] of [['afm-ingest-directory', 'afm-choose-ingest'], ['afm-destination-root', 'afm-choose-destination']]) {
+    const input = afmEl(inputId);
+    const button = afmEl(buttonId);
+    if (button) button.style.display = serverMode ? 'none' : '';
+    if (input) {
+      if (serverMode) input.removeAttribute('readonly');
+      else input.setAttribute('readonly', 'readonly');
+    }
+  }
+
+  afmSetStatus('');
+  const results = afmEl('afm-results');
+  if (results) results.innerHTML = '';
+  updateActiveFileManagementGrayed();
+  requestAnimationFrame(() => updateActiveFileManagementGrayed());
+
+  dialog.showModal();
+};
+
 // About dialog functions - defined at top level for accessibility
 function bindAboutCloseButton() {
   const dialog = document.getElementById('about-dialog');
@@ -9728,6 +10002,43 @@ document.addEventListener('DOMContentLoaded', async () => {
   window.electron.onOpenSTLHome(async () => {
     await window.openSTLHomeDialog();
   });
+
+  // Open the Active File Management dialog from the Settings menu
+  if (typeof window.electron.onOpenActiveFileManagement === 'function') {
+    window.electron.onOpenActiveFileManagement(async () => {
+      await window.openActiveFileManagementDialog();
+    });
+  }
+
+  // A background re-file changed where models live; refresh so the grid shows current paths.
+  if (typeof window.electron.onLibraryReorganized === 'function') {
+    window.electron.onLibraryReorganized(async (payload) => {
+      try {
+        console.log('[Active File Management] Re-filed', payload && payload.moved, 'project(s)');
+        const models = await window.electron.getAllModels();
+        if (typeof window.displayModels === 'function') await window.displayModels(models);
+      } catch (error) {
+        console.error('[Active File Management] Refresh after re-file failed:', error);
+      }
+    });
+  }
+
+  // An unattended ingestion pass moved files; re-index so the library matches disk.
+  if (typeof window.electron.onIngestCompleted === 'function') {
+    window.electron.onIngestCompleted(async (summary) => {
+      try {
+        if (!summary || !summary.destinationRoot) return;
+        if (typeof window.performSTLHomeScan === 'function') {
+          await window.performSTLHomeScan(summary.destinationRoot);
+        }
+        if (typeof window.electron.applyIngestMetadata === 'function') {
+          await window.electron.applyIngestMetadata(summary.results || []);
+        }
+      } catch (error) {
+        console.error('[Active File Management] Re-index after automatic ingest failed:', error);
+      }
+    });
+  }
 
   // Handler for "Choose Directory" button in the STL Home dialog
   document.getElementById('choose-stl-home-button')?.addEventListener('click', async () => {

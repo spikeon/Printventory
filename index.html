@@ -677,6 +677,121 @@
         </div>
       </form>
     </dialog>
+    <dialog id="active-file-management-dialog" class="modal">
+      <form method="dialog">
+        <h3>Active File Management</h3>
+        <p class="warning-text">
+          Warning: this moves files on disk. Anything Printventory recognises in the ingestion
+          folder is moved into your library folder and will no longer be where you put it.
+          Use Preview first to see exactly where each project would go.
+        </p>
+        <p class="setting-description">
+          Printventory normally leaves your files alone and only indexes them. Turn this on and it
+          takes over filing: drop a download into the ingestion folder and it is moved into your
+          library under a folder structure built from the model's own metadata. Whole projects move
+          together, so BOMs, assembly instructions and images stay with the models they belong to,
+          and ZIP files are extracted first so their contents arrive as one project.
+        </p>
+        <div class="form-group checkbox-container">
+          <input type="checkbox" id="afm-enabled" value="1" onclick="setTimeout(function(){ if(window.updateActiveFileManagementGrayed) window.updateActiveFileManagementGrayed(); }, 0)">
+          <label for="afm-enabled">Enable active file management</label>
+        </div>
+        <div id="afm-options" class="stl-home-path-metadata-options">
+          <div class="settings-group">
+            <h4>Folders</h4>
+            <div class="form-group afm-dir-row">
+              <label for="afm-ingest-directory">Ingestion folder:</label>
+              <input type="text" id="afm-ingest-directory" placeholder="No folder selected" readonly>
+              <div class="afm-dir-buttons">
+                <button type="button" id="afm-choose-ingest" class="primary-button">Choose Folder</button>
+                <button type="button" id="afm-clear-ingest" class="secondary-button">Clear</button>
+              </div>
+            </div>
+            <p class="setting-description">Watched for new downloads. Files here are moved out, not copied.</p>
+            <div class="form-group afm-dir-row">
+              <label for="afm-destination-root">Library folder:</label>
+              <input type="text" id="afm-destination-root" placeholder="Defaults to STL Home" readonly>
+              <div class="afm-dir-buttons">
+                <button type="button" id="afm-choose-destination" class="primary-button">Choose Folder</button>
+                <button type="button" id="afm-clear-destination" class="secondary-button">Clear</button>
+              </div>
+            </div>
+            <p class="setting-description">Where projects are filed. Leave empty to use your STL Home folder.</p>
+          </div>
+
+          <div class="settings-group">
+            <h4>Folder structure</h4>
+            <div class="form-group">
+              <label for="afm-pattern">Folder pattern:</label>
+              <input type="text" id="afm-pattern" class="afm-pattern-input" spellcheck="false"
+                placeholder="/(%author%|Unknown Designer)/%name%/">
+            </div>
+            <p class="setting-description">
+              <code>%token%</code> inserts a value. <code>(a|b)</code> uses the first option that has a value,
+              so a plain word at the end acts as the fallback. <code>/</code> starts a new folder level; a level
+              that comes out empty is dropped rather than left blank.
+            </p>
+            <p class="setting-description">
+              Tokens: <code>%author%</code> (designer), <code>%name%</code> (model),
+              <code>%category%</code> (first tag), <code>%license%</code>, <code>%parent%</code>, <code>%source%</code>.
+            </p>
+            <p class="setting-description afm-pattern-examples">
+              Examples:
+              <code>/(%author%|Unknown Designer)/%name%/</code> ·
+              <code>/(%category%|Uncategorized)/(%author%|Unknown)/%name%/</code> ·
+              <code>%author% - %name%</code>
+            </p>
+            <p class="setting-description afm-pattern-preview" id="afm-pattern-preview"></p>
+            <p class="setting-description">
+              Changing the pattern re-files everything already in the library. Editing a model's designer,
+              tags, licence or parent model re-files that project on its own, in the background.
+            </p>
+            <div class="form-group">
+              <label for="afm-on-conflict">If the destination already exists:</label>
+              <select id="afm-on-conflict">
+                <option value="suffix">Keep both — add a numbered suffix</option>
+                <option value="merge">Merge into the existing project folder</option>
+                <option value="skip">Leave it in the ingestion folder</option>
+              </select>
+            </div>
+          </div>
+
+          <div class="settings-group">
+            <h4>Archives</h4>
+            <div class="form-group checkbox-container">
+              <input type="checkbox" id="afm-extract-zips" checked>
+              <label for="afm-extract-zips">Extract ZIP files and file their contents as one project</label>
+            </div>
+            <div class="form-group checkbox-container">
+              <input type="checkbox" id="afm-delete-zip" checked>
+              <label for="afm-delete-zip">Delete the ZIP after its contents are filed successfully</label>
+            </div>
+          </div>
+
+          <div class="settings-group">
+            <h4>Automatic ingestion</h4>
+            <div class="form-group">
+              <label for="afm-auto-run-minutes">Run automatically every (minutes, 0 = manual only):</label>
+              <input type="number" id="afm-auto-run-minutes" min="0" max="1440" value="0">
+            </div>
+          </div>
+
+          <div class="settings-group">
+            <h4>Run</h4>
+            <div class="afm-dir-buttons">
+              <button type="button" id="afm-preview" class="secondary-button">Preview</button>
+              <button type="button" id="afm-run" class="primary-button">Ingest Now</button>
+            </div>
+            <p class="setting-description" id="afm-status"></p>
+            <div id="afm-results" class="afm-results"></div>
+          </div>
+        </div>
+        <div class="dialog-buttons">
+          <button type="button" id="afm-save" onclick="if(window.saveActiveFileManagementFromDialog) window.saveActiveFileManagementFromDialog()">Save</button>
+          <button type="button" id="afm-cancel" onclick="document.getElementById('active-file-management-dialog')?.close()">Cancel</button>
+        </div>
+      </form>
+    </dialog>
     <dialog id="slicer-dialog" class="modal">
       <form method="dialog">
         <h3>Slicer Settings</h3>

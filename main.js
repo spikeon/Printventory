@@ -1767,6 +1767,8 @@ if (!gotTheLock) {
       // across container restarts instead of being overwritten every startup.
       applyDockerEnvSettingIfNeeded('stlHome', process.env.STL_HOME);
       applyDockerEnvSettingIfNeeded('extensionUploadDirectory', process.env.EXTENSION_UPLOAD_DIR);
+      // Docker has no folder picker, so the ingestion folder is settable by env too.
+      applyDockerEnvSettingIfNeeded('ingestDirectory', process.env.INGEST_DIR);
 
       // Clear leftover zip-extract temps off the critical path (can readdir a busy OS temp)
       setImmediate(() => {
@@ -1850,6 +1852,13 @@ if (!gotTheLock) {
         scheduleBackgroundThumbnailCompression('startup');
       }
       
+      // Active file management: arm the unattended ingestion timer if the user enabled one.
+      try {
+        restartIngestAutoRun();
+      } catch (ingestTimerError) {
+        console.error('[Ingest] Could not start the automatic ingestion timer:', ingestTimerError);
+      }
+
       // Track application usage after initialization (skip in server mode; do not block ready)
       if (!isServerMode) {
         setImmediate(() => {
@@ -2119,6 +2128,16 @@ function migrateRatingFavoriteColumns() {
 /** Zip bundle columns for grouped browsing (folder siblings are not bundled). */
 function migrateBundleColumns() {
   try {
+    console.log('Checking for projectPath column migration...');
+    const projectPathInfo = db.prepare('PRAGMA table_info(models)').all();
+    if (!projectPathInfo.some((col) => col.name === 'projectPath')) {
+      // Active file management records which project folder a model belongs to, so a later
+      // metadata edit can move the whole project instead of guessing at its root.
+      db.prepare('ALTER TABLE models ADD COLUMN projectPath TEXT').run();
+      console.log('Added models.projectPath');
+    }
+    db.prepare('CREATE INDEX IF NOT EXISTS idx_models_projectpath ON models(projectPath)').run();
+
     console.log('Checking for bundle column migration...');
     const tableInfo = db.prepare('PRAGMA table_info(models)').all();
     const names = new Set(tableInfo.map((col) => col.name));
@@ -2460,6 +2479,10 @@ async function createWindow() {
       label: 'Settings',
       submenu: [
         {
+          label: 'Active File Management',
+          click: () => mainWindow.webContents.send('open-active-file-management')
+        },
+        {
           label: 'AI Config',
           click: () => {
             if (mainWindow && !mainWindow.isDestroyed()) {
@@ -2727,6 +2750,10 @@ function createApplicationMenu() {
     {
       label: 'Settings',
       submenu: [
+        {
+          label: 'Active File Management',
+          click: () => mainWindow.webContents.send('open-active-file-management')
+        },
         {
           label: 'AI Config',
           click: () => mainWindow.webContents.send('open-ai-config')
@@ -3627,10 +3654,40 @@ ipcMain.handle('get-model', async (event, filePath) => {
   }
 });
 
+/**
+ * Look up the ids of the models a save call touched, so a metadata edit can be
+ * followed by a re-file of the projects those models live in.
+ */
+function modelIdsForSavedData(modelData) {
+  const batch = Array.isArray(modelData) ? modelData : [modelData];
+  const ids = [];
+  try {
+    const byPath = db.prepare('SELECT id FROM models WHERE filePath = ?');
+    for (const entry of batch) {
+      if (!entry) continue;
+      if (entry.id != null) {
+        ids.push(entry.id);
+        continue;
+      }
+      if (!entry.filePath) continue;
+      const row = byPath.get(entry.filePath);
+      if (row && row.id != null) ids.push(row.id);
+    }
+  } catch (error) {
+    console.error('[Active File Management] Could not resolve saved model ids:', error);
+  }
+  return ids;
+}
+
 // Update the save-model handler to not store tags in the models table
-ipcMain.handle('save-model', async (event, modelData) => {
-  return await saveModel(modelData);
-});
+const saveModelHandler = async (event, modelData) => {
+  const result = await saveModel(modelData);
+  // Designer / tags / parent model feed the folder pattern, so the project may need moving.
+  scheduleProjectReorganize(modelIdsForSavedData(modelData));
+  return result;
+};
+ipcMain.handle('save-model', saveModelHandler);
+ipcHandlerRegistry.set('save-model', saveModelHandler);
 
 ipcMain.handle('save-model-from-upload', async (event, payload) => {
   return await saveModelFromUpload(payload);
@@ -3640,9 +3697,13 @@ ipcMain.handle('save-model-batch', async (event, modelDataBatch) => {
   return await saveModelBatch(modelDataBatch);
 });
 
-ipcMain.handle('update-models-batch', async (event, modelDataBatch) => {
-  return await updateModelsBatch(modelDataBatch);
-});
+const updateModelsBatchHandler = async (event, modelDataBatch) => {
+  const result = await updateModelsBatch(modelDataBatch);
+  scheduleProjectReorganize(modelIdsForSavedData(modelDataBatch));
+  return result;
+};
+ipcMain.handle('update-models-batch', updateModelsBatchHandler);
+ipcHandlerRegistry.set('update-models-batch', updateModelsBatchHandler);
 
 ipcMain.handle('save-thumbnail', async (event, filePath, thumbnail) => {
   try {
@@ -9049,6 +9110,595 @@ ipcMain.handle('pull-3mf-metadata', async (event, filePaths) => {
   }
 });
 
+// ---------------------------------------------------------------------------
+// Active file management (ingestion)
+//
+// Passive mode (the default) leaves files where they are and only indexes them.
+// When active file management is on, anything dropped into the ingestion folder is
+// moved into the library under {designer}/{model} — projects intact, zips expanded —
+// and the metadata that decided the destination is written back onto the models.
+// ---------------------------------------------------------------------------
+
+const { runIngest: runIngestEngine, INGEST_DEFAULTS } = require('./ingest');
+
+const INGEST_SETTING_KEYS = {
+  enabled: 'activeFileManagementEnabled',
+  ingestDirectory: 'ingestDirectory',
+  destinationRoot: 'ingestDestinationRoot',
+  pattern: 'ingestFolderPattern',
+  onConflict: 'ingestOnConflict',
+  extractZips: 'ingestExtractZips',
+  deleteZipAfterExtract: 'ingestDeleteZipAfterExtract',
+  autoRunMinutes: 'ingestAutoRunMinutes'
+};
+
+function readSettingRaw(key) {
+  try {
+    if (!db || !db.prepare) return null;
+    const row = db.prepare('SELECT value FROM settings WHERE key = ?').get(key);
+    return row && row.value != null ? row.value : null;
+  } catch (error) {
+    console.error('[Ingest] Error reading setting', key, error);
+    return null;
+  }
+}
+
+/**
+ * Resolve the ingestion configuration, filling in defaults.
+ * The destination defaults to STL Home, which is the folder the library already scans.
+ */
+function getIngestSettings() {
+  const stlHome = readSettingRaw('stlHome') || '';
+  const destinationRaw = readSettingRaw(INGEST_SETTING_KEYS.destinationRoot);
+  const patternRaw = readSettingRaw(INGEST_SETTING_KEYS.pattern);
+  const conflictRaw = readSettingRaw(INGEST_SETTING_KEYS.onConflict);
+  const extractRaw = readSettingRaw(INGEST_SETTING_KEYS.extractZips);
+  const deleteZipRaw = readSettingRaw(INGEST_SETTING_KEYS.deleteZipAfterExtract);
+  const autoRunRaw = parseInt(readSettingRaw(INGEST_SETTING_KEYS.autoRunMinutes), 10);
+
+  return {
+    enabled: readSettingRaw(INGEST_SETTING_KEYS.enabled) === '1',
+    ingestDirectory: readSettingRaw(INGEST_SETTING_KEYS.ingestDirectory) || '',
+    destinationRoot: (destinationRaw && destinationRaw.trim()) ? destinationRaw.trim() : stlHome,
+    destinationRootExplicit: (destinationRaw || '').trim(),
+    stlHome,
+    pattern: (patternRaw && patternRaw.trim()) ? patternRaw.trim() : INGEST_DEFAULTS.pattern,
+    onConflict: ['suffix', 'merge', 'skip'].includes(conflictRaw) ? conflictRaw : INGEST_DEFAULTS.onConflict,
+    extractZips: extractRaw == null ? INGEST_DEFAULTS.extractZips : extractRaw === '1',
+    deleteZipAfterExtract: deleteZipRaw == null ? INGEST_DEFAULTS.deleteZipAfterExtract : deleteZipRaw === '1',
+    autoRunMinutes: Number.isInteger(autoRunRaw) && autoRunRaw > 0 ? autoRunRaw : 0
+  };
+}
+
+/** Fully expand an archive into a directory, skipping macOS resource-fork junk. */
+async function extractZipToDirectory(zipPath, destDir) {
+  const StreamZip = require('node-stream-zip');
+  const zip = new StreamZip.async({ file: zipPath });
+  try {
+    const entries = await zip.entries();
+    for (const entry of Object.values(entries)) {
+      if (entry.isDirectory) continue;
+      if (isMacOsResourceForkEntry(entry.name)) continue;
+      const relative = String(entry.name).replace(/\\/g, '/');
+      // A zip entry that climbs out of the extraction directory is a zip-slip attempt.
+      const target = path.resolve(destDir, relative);
+      if (!target.startsWith(path.resolve(destDir) + path.sep)) {
+        console.warn('[Ingest] Skipping unsafe zip entry:', entry.name);
+        continue;
+      }
+      fs.mkdirSync(path.dirname(target), { recursive: true });
+      await zip.extract(entry.name, target);
+    }
+  } finally {
+    await zip.close();
+  }
+}
+
+/** Send an ingest event to the desktop window and, in server mode, to browser clients. */
+function sendIngestEvent(channel, payload) {
+  try {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send(channel, payload);
+    }
+  } catch (error) {
+    // window may be closing; not fatal
+  }
+  if (isServerMode && global.broadcastEvent) {
+    try {
+      global.broadcastEvent(channel, payload);
+    } catch (error) {
+      console.error('[Ingest] Error broadcasting', channel, error);
+    }
+  }
+}
+
+/**
+ * Write the metadata that chose each destination back onto the models now indexed
+ * there. Only empty fields are filled, so anything the user typed always wins.
+ */
+function applyIngestMetadataToLibrary(results) {
+  if (!db || !db.prepare || !Array.isArray(results)) return { updated: 0 };
+  let updated = 0;
+
+  const selectStmt = db.prepare(`
+    SELECT id, designer, source, license, notes, parentModel, projectPath FROM models
+    WHERE REPLACE(LOWER(filePath), CHAR(92), '/') LIKE ?
+  `);
+  const updateStmt = db.prepare(
+    'UPDATE models SET designer = ?, source = ?, license = ?, notes = ?, parentModel = ?, projectPath = ? WHERE id = ?'
+  );
+
+  const isEmpty = (value) => value == null || String(value).trim() === '';
+
+  for (const result of results) {
+    if (!result || result.status !== 'moved' || !result.destination || !result.metadata) continue;
+    const meta = result.metadata;
+    const prefixParam = directoryScanPrefixSqlParam(result.destination);
+    let rows = [];
+    try {
+      rows = selectStmt.all(prefixParam);
+    } catch (error) {
+      console.error('[Ingest] Error selecting models for', result.destination, error);
+      continue;
+    }
+    for (const row of rows) {
+      const designer = isEmpty(row.designer) && meta.designer ? meta.designer : row.designer;
+      const source = isEmpty(row.source) && meta.source ? meta.source : row.source;
+      const license = isEmpty(row.license) && meta.license ? meta.license : row.license;
+      const notes = isEmpty(row.notes) && meta.notes ? meta.notes : row.notes;
+      const parentModel = isEmpty(row.parentModel) && meta.model ? meta.model : row.parentModel;
+      // Remember the project this model arrived in so a later metadata edit can move the
+      // whole folder rather than having to guess where the project starts.
+      const projectPath = result.destination;
+      if (designer === row.designer && source === row.source && license === row.license
+        && notes === row.notes && parentModel === row.parentModel && projectPath === row.projectPath) {
+        continue;
+      }
+      try {
+        updateStmt.run(designer || null, source || null, license || null, notes || null, parentModel || null, projectPath || null, row.id);
+        updated++;
+      } catch (error) {
+        console.error('[Ingest] Error updating model', row.id, error);
+      }
+    }
+  }
+  return { updated };
+}
+
+/** Run a single ingestion pass using the saved settings. */
+async function runIngestPass({ dryRun = false } = {}) {
+  const settings = getIngestSettings();
+  if (!settings.enabled) throw new Error('Active file management is turned off.');
+  if (!settings.ingestDirectory) throw new Error('No ingestion folder is set.');
+  if (!settings.destinationRoot) throw new Error('No library folder is set. Choose one, or set an STL Home.');
+  // Same path rules the rest of server mode enforces, so a bad share path fails loudly here
+  // rather than part-way through moving somebody's files.
+  validateUncPath(settings.ingestDirectory, 'ingest');
+  validateUncPath(settings.destinationRoot, 'ingest');
+
+  const summary = await runIngestEngine({
+    ingestDirectory: settings.ingestDirectory,
+    destinationRoot: settings.destinationRoot,
+    pattern: settings.pattern,
+    onConflict: settings.onConflict,
+    modelExtensions: getSupportedExtensionsForLibrary(db),
+    extractZips: settings.extractZips,
+    deleteZipAfterExtract: settings.deleteZipAfterExtract,
+    dryRun,
+    extract3MFMetadata: async (filePath) => {
+      const raw = await extract3MFMetadata(filePath);
+      return raw ? filter3MFMetadataBySettings(raw) : null;
+    },
+    extractZip: extractZipToDirectory,
+    onProgress: (progress) => sendIngestEvent('ingest-progress', progress)
+  });
+
+  return summary;
+}
+
+const runIngestHandler = async (event, options = {}) => {
+  try {
+    return await runIngestPass({ dryRun: !!(options && options.dryRun) });
+  } catch (error) {
+    console.error('[Ingest] Run failed:', error);
+    throw error;
+  }
+};
+ipcMain.handle('run-ingest', runIngestHandler);
+ipcHandlerRegistry.set('run-ingest', runIngestHandler);
+
+const getIngestSettingsHandler = async () => getIngestSettings();
+ipcMain.handle('get-ingest-settings', getIngestSettingsHandler);
+ipcHandlerRegistry.set('get-ingest-settings', getIngestSettingsHandler);
+
+const applyIngestMetadataHandler = async (event, results) => applyIngestMetadataToLibrary(results);
+ipcMain.handle('apply-ingest-metadata', applyIngestMetadataHandler);
+ipcHandlerRegistry.set('apply-ingest-metadata', applyIngestMetadataHandler);
+
+// Directory picker for the ingestion dialog. Server mode has no native dialog, so
+// the renderer keeps its text inputs editable there instead of calling this.
+ipcMain.handle('choose-ingest-folder', async (event) => {
+  const testPath = process.env.PRINTVENTORY_TEST_INGEST_PATH;
+  if (testPath && typeof testPath === 'string') return testPath;
+  const parentWindow = BrowserWindow.fromWebContents(event.sender) || mainWindow;
+  const result = await dialog.showOpenDialog(parentWindow, { properties: ['openDirectory', 'createDirectory'] });
+  if (result.canceled || !result.filePaths || result.filePaths.length === 0) return null;
+  return result.filePaths[0];
+});
+
+let ingestAutoRunTimer = null;
+let ingestPassInFlight = false;
+
+/** Start (or restart) the unattended ingestion timer to match the saved settings. */
+function restartIngestAutoRun() {
+  if (ingestAutoRunTimer) {
+    clearInterval(ingestAutoRunTimer);
+    ingestAutoRunTimer = null;
+  }
+  let settings;
+  try {
+    settings = getIngestSettings();
+  } catch (error) {
+    return;
+  }
+  if (!settings.enabled || settings.autoRunMinutes <= 0) return;
+  if (!settings.ingestDirectory || !settings.destinationRoot) return;
+
+  const intervalMs = settings.autoRunMinutes * 60 * 1000;
+  ingestAutoRunTimer = setInterval(async () => {
+    if (ingestPassInFlight) return;
+    ingestPassInFlight = true;
+    try {
+      const summary = await runIngestPass({});
+      if (summary.moved > 0) sendIngestEvent('ingest-completed', summary);
+    } catch (error) {
+      console.error('[Ingest] Scheduled pass failed:', error);
+    } finally {
+      ingestPassInFlight = false;
+    }
+  }, intervalMs);
+  console.log(`[Ingest] Automatic ingestion every ${settings.autoRunMinutes} minute(s)`);
+}
+global.restartIngestAutoRun = restartIngestAutoRun;
+
+ipcMain.handle('restart-ingest-auto-run', async () => {
+  restartIngestAutoRun();
+  return true;
+});
+ipcHandlerRegistry.set('restart-ingest-auto-run', async () => {
+  restartIngestAutoRun();
+  return true;
+});
+
+// ---------------------------------------------------------------------------
+// Keeping the library in step with edited metadata
+//
+// The folder pattern is built out of model metadata, so editing that metadata in the
+// UI invalidates the folder a project lives in. With active file management on, the
+// project is moved to wherever the pattern now points — quietly, in the background,
+// with the database rewritten to match.
+// ---------------------------------------------------------------------------
+
+const { renderPattern, isInside: isPathInside } = require('./ingest');
+
+/** Compare two paths the way the filesystem in front of us would. */
+function samePath(a, b) {
+  if (!a || !b) return false;
+  const left = normalizePath(a).replace(/\/+$/, '');
+  const right = normalizePath(b).replace(/\/+$/, '');
+  return process.platform === 'win32' ? left.toLowerCase() === right.toLowerCase() : left === right;
+}
+
+/** The first tag on a model, used for the %category% token. */
+function firstTagForModel(modelId) {
+  try {
+    const row = db.prepare(`
+      SELECT tags.name AS name FROM model_tags
+      JOIN tags ON tags.id = model_tags.tag_id
+      WHERE model_tags.model_id = ?
+      ORDER BY tags.name LIMIT 1
+    `).get(modelId);
+    return row && row.name ? row.name : '';
+  } catch (error) {
+    return '';
+  }
+}
+
+/**
+ * Work out which folder under the library root holds a model's project.
+ * The recorded projectPath wins; otherwise the folder is inferred from how many
+ * levels the pattern describes, which is what ingestion would have created.
+ */
+function projectDirForModel(row, destinationRoot, patternDepth) {
+  if (row.projectPath && isPathInside(destinationRoot, row.projectPath)) return row.projectPath;
+  const filePath = String(row.filePath || '');
+  if (!filePath || filePath.startsWith('url::')) return null;
+  const onDisk = filePath.includes('::') ? filePath.split('::')[0] : filePath;
+  if (!isPathInside(destinationRoot, onDisk)) return null;
+  const relative = path.relative(destinationRoot, path.dirname(onDisk));
+  const segments = normalizePath(relative).split('/').filter(Boolean);
+  if (segments.length === 0) return null; // loose in the root: not a project we placed
+  const depth = Math.min(Math.max(patternDepth, 1), segments.length);
+  return path.join(destinationRoot, ...segments.slice(0, depth));
+}
+
+/** Delete folders left empty behind a move, stopping at the library root. */
+function pruneEmptyDirectories(startDir, stopRoot) {
+  let current = startDir;
+  for (let i = 0; i < 12; i++) {
+    if (!current || samePath(current, stopRoot) || !isPathInside(stopRoot, current)) return;
+    let entries;
+    try {
+      entries = fs.readdirSync(current);
+    } catch (error) {
+      return;
+    }
+    const meaningful = entries.filter((name) => name !== '.DS_Store' && name.toLowerCase() !== 'thumbs.db');
+    if (meaningful.length > 0) return;
+    try {
+      fs.rmSync(current, { recursive: true, force: true });
+    } catch (error) {
+      return;
+    }
+    current = path.dirname(current);
+  }
+}
+
+/** Rewrite every stored path that lived under `fromDir` so it points into `toDir`. */
+function rewriteModelPaths(fromDir, toDir) {
+  const rows = db.prepare(`
+    SELECT id, filePath FROM models
+    WHERE REPLACE(LOWER(filePath), CHAR(92), '/') LIKE ?
+  `).all(directoryScanPrefixSqlParam(fromDir));
+  const update = db.prepare('UPDATE models SET filePath = ?, projectPath = ? WHERE id = ?');
+  const fromNormalized = normalizePath(fromDir).replace(/\/+$/, '');
+  let moved = 0;
+  const apply = db.transaction(() => {
+    for (const row of rows) {
+      const original = String(row.filePath || '');
+      const remainder = normalizePath(original).slice(fromNormalized.length);
+      const rebuilt = normalizePath(toDir).replace(/\/+$/, '') + remainder;
+      const next = process.platform === 'win32' ? rebuilt.replace(/\//g, '\\') : rebuilt;
+      update.run(next, toDir, row.id);
+      moved++;
+    }
+  });
+  apply();
+  return moved;
+}
+
+/**
+ * Move one project folder to where the pattern now says it belongs.
+ * Returns the new path, or null when nothing needed to happen.
+ */
+async function reorganizeOneProject(projectDir, settings) {
+  const root = settings.destinationRoot;
+  if (!fs.existsSync(projectDir)) return null;
+
+  const models = db.prepare(`
+    SELECT id, filePath, designer, license, parentModel, source, projectPath FROM models
+    WHERE REPLACE(LOWER(filePath), CHAR(92), '/') LIKE ?
+  `).all(directoryScanPrefixSqlParam(projectDir));
+  if (models.length === 0) return null;
+
+  const firstNonEmpty = (field) => {
+    for (const model of models) {
+      const value = model[field];
+      if (value != null && String(value).trim() !== '') return String(value).trim();
+    }
+    return '';
+  };
+  let category = '';
+  for (const model of models) {
+    category = firstTagForModel(model.id);
+    if (category) break;
+  }
+
+  const vars = {
+    designer: firstNonEmpty('designer'),
+    model: firstNonEmpty('parentModel') || path.basename(projectDir),
+    parentModel: firstNonEmpty('parentModel'),
+    category,
+    license: firstNonEmpty('license'),
+    source: firstNonEmpty('source')
+  };
+
+  const segments = renderPattern(settings.pattern, vars);
+  if (segments.length === 0) return null;
+  let target = path.join(root, ...segments);
+  if (samePath(target, projectDir)) return null;
+  if (!isPathInside(root, target)) return null;
+
+  if (fs.existsSync(target)) {
+    if (settings.onConflict === 'skip') return null;
+    if (settings.onConflict !== 'merge') {
+      let unique = null;
+      for (let n = 2; n < 1000; n++) {
+        const candidate = `${target} (${n})`;
+        if (!fs.existsSync(candidate)) { unique = candidate; break; }
+      }
+      if (!unique) return null;
+      target = unique;
+    }
+  }
+
+  const previousParent = path.dirname(projectDir);
+  await fs.promises.mkdir(path.dirname(target), { recursive: true });
+  if (fs.existsSync(target)) {
+    // Merge policy: fold the files in rather than replacing what is already there.
+    await mergeDirectoryTree(projectDir, target);
+  } else {
+    try {
+      await fs.promises.rename(projectDir, target);
+    } catch (error) {
+      if (error && (error.code === 'EXDEV' || error.code === 'EPERM')) {
+        await fs.promises.cp(projectDir, target, { recursive: true, force: false, errorOnExist: false });
+        await fs.promises.rm(projectDir, { recursive: true, force: true });
+      } else {
+        throw error;
+      }
+    }
+  }
+
+  rewriteModelPaths(projectDir, target);
+  pruneEmptyDirectories(previousParent, root);
+  console.log('[Active File Management] Re-filed', projectDir, '->', target);
+  return target;
+}
+
+/** Move the contents of one directory into another, keeping both sides' files. */
+async function mergeDirectoryTree(source, destination) {
+  await fs.promises.mkdir(destination, { recursive: true });
+  const entries = await fs.promises.readdir(source, { withFileTypes: true });
+  for (const entry of entries) {
+    const from = path.join(source, entry.name);
+    let to = path.join(destination, entry.name);
+    if (entry.isDirectory()) {
+      await mergeDirectoryTree(from, to);
+      continue;
+    }
+    if (fs.existsSync(to)) {
+      const ext = path.extname(entry.name);
+      const stem = path.basename(entry.name, ext);
+      for (let n = 2; n < 1000 && fs.existsSync(to); n++) {
+        to = path.join(destination, `${stem} (${n})${ext}`);
+      }
+    }
+    await fs.promises.rename(from, to).catch(async (error) => {
+      if (error && (error.code === 'EXDEV' || error.code === 'EPERM')) {
+        await fs.promises.copyFile(from, to);
+        await fs.promises.rm(from, { force: true });
+      } else {
+        throw error;
+      }
+    });
+  }
+  await fs.promises.rm(source, { recursive: true, force: true });
+}
+
+/**
+ * Re-file the projects the given models belong to. Used after a metadata edit, and
+ * with no ids at all to sweep the whole library after the pattern itself changes.
+ */
+async function reorganizeProjects(modelIds) {
+  const settings = getIngestSettings();
+  if (!settings.enabled || !settings.destinationRoot) return { moved: 0 };
+  if (!fs.existsSync(settings.destinationRoot)) return { moved: 0 };
+
+  const patternDepth = renderPattern(settings.pattern, {
+    designer: 'd', model: 'm', category: 'c', license: 'l', parentModel: 'p', source: 's'
+  }).length || 1;
+
+  let rows;
+  if (Array.isArray(modelIds) && modelIds.length > 0) {
+    const placeholders = modelIds.map(() => '?').join(',');
+    rows = db.prepare(`SELECT id, filePath, projectPath FROM models WHERE id IN (${placeholders})`).all(...modelIds);
+  } else {
+    rows = db.prepare(`
+      SELECT id, filePath, projectPath FROM models
+      WHERE REPLACE(LOWER(filePath), CHAR(92), '/') LIKE ?
+    `).all(directoryScanPrefixSqlParam(settings.destinationRoot));
+  }
+
+  const projectDirs = new Set();
+  for (const row of rows) {
+    const dir = projectDirForModel(row, settings.destinationRoot, patternDepth);
+    if (dir) projectDirs.add(dir);
+  }
+
+  let moved = 0;
+  const movedProjects = [];
+  for (const dir of projectDirs) {
+    try {
+      const target = await reorganizeOneProject(dir, settings);
+      if (target) {
+        moved++;
+        movedProjects.push({ from: dir, to: target });
+      }
+    } catch (error) {
+      console.error('[Active File Management] Could not re-file', dir, error);
+    }
+  }
+  if (moved > 0) sendIngestEvent('library-reorganized', { moved, projects: movedProjects });
+  return { moved, projects: movedProjects };
+}
+
+let reorganizeTimer = null;
+let reorganizeInFlight = false;
+const reorganizePendingIds = new Set();
+
+/**
+ * Queue a background re-file for the models that were just edited.
+ * Edits arrive in bursts (bulk edit, tag changes), so the work is debounced and the
+ * caller is never made to wait on disk I/O.
+ */
+function scheduleProjectReorganize(modelIds) {
+  try {
+    if (!Array.isArray(modelIds) || modelIds.length === 0) return;
+    const settings = getIngestSettings();
+    if (!settings.enabled || !settings.destinationRoot) return;
+    for (const id of modelIds) {
+      if (id != null) reorganizePendingIds.add(id);
+    }
+    if (reorganizeTimer) clearTimeout(reorganizeTimer);
+    reorganizeTimer = setTimeout(async () => {
+      reorganizeTimer = null;
+      if (reorganizeInFlight) {
+        // Another sweep is running; re-arm so these ids are not dropped.
+        scheduleProjectReorganize(Array.from(reorganizePendingIds));
+        return;
+      }
+      const ids = Array.from(reorganizePendingIds);
+      reorganizePendingIds.clear();
+      reorganizeInFlight = true;
+      try {
+        await reorganizeProjects(ids);
+      } catch (error) {
+        console.error('[Active File Management] Background re-file failed:', error);
+      } finally {
+        reorganizeInFlight = false;
+      }
+    }, 1500);
+  } catch (error) {
+    console.error('[Active File Management] Could not queue a re-file:', error);
+  }
+}
+global.scheduleProjectReorganize = scheduleProjectReorganize;
+
+const reorganizeLibraryHandler = async () => {
+  if (reorganizeInFlight) return { moved: 0, busy: true };
+  reorganizeInFlight = true;
+  try {
+    return await reorganizeProjects([]);
+  } finally {
+    reorganizeInFlight = false;
+  }
+};
+ipcMain.handle('reorganize-library', reorganizeLibraryHandler);
+ipcHandlerRegistry.set('reorganize-library', reorganizeLibraryHandler);
+
+/**
+ * Render a folder pattern against sample metadata so the settings dialog can show what
+ * it produces — both when a model carries metadata and when it carries none.
+ */
+const previewFolderPatternHandler = async (event, pattern) => {
+  const filled = renderPattern(pattern, {
+    designer: 'CinderWing3D',
+    model: 'Articulated Dragon',
+    parentModel: 'Articulated Dragon',
+    category: 'Toys',
+    license: 'CC BY-NC 4.0',
+    source: 'https://example.com/dragon'
+  });
+  const bare = renderPattern(pattern, {
+    designer: '', model: 'Untitled Model', parentModel: '', category: '', license: '', source: ''
+  });
+  return { withMetadata: filled.join('/'), withoutMetadata: bare.join('/') };
+};
+ipcMain.handle('preview-folder-pattern', previewFolderPatternHandler);
+ipcHandlerRegistry.set('preview-folder-pattern', previewFolderPatternHandler);
+
+
 // Add handler to extract model from zip to temp file
 ipcMain.handle('extract-model-from-zip', async (event, filePath) => {
   if (isUrlModel(filePath)) throw new Error('URL-only model has no file to extract');
@@ -11174,8 +11824,9 @@ async function saveModel(modelData) {
   }
 }
 
-// Register save-model for Chrome extension (WebSocket works in normal and server mode)
-ipcHandlerRegistry.set('save-model', async (event, modelData) => await saveModel(modelData));
+// Register save-model for Chrome extension (WebSocket works in normal and server mode).
+// Uses the same handler as IPC so active file management sees extension saves too.
+ipcHandlerRegistry.set('save-model', saveModelHandler);
 
 // Extension upload: write file to configured directory then saveModel (used by POST /api/extension-upload and IPC)
 async function saveModelFromUpload(payload) {

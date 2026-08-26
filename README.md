@@ -25,6 +25,7 @@ Printventory is an Electron-based desktop application for managing your 3D print
 - **License Tracking**: Assign licenses to models
 
 ### Advanced Features
+- **Active File Management**: Opt-in mode that files downloads for you — drop a folder, ZIP or loose model into an ingestion folder and Printventory moves it into your library under a folder pattern you define, keeping whole projects together and re-filing them when you edit their metadata (see [Active File Management](#active-file-management))
 - **Server Mode**: Run Printventory as a web server accessible from any device on your local network (see [Server Mode](#server-mode) section for details)
 - **Multi-Edit Mode**: Select and edit multiple models simultaneously for batch operations
 - **Duplicate Detection**: Find duplicate files based on content hash with visual comparison
@@ -162,6 +163,115 @@ To disable automatic scanning, clear the STL Home directory field and save. This
 ### Getting Help
 
 For more information about Server Mode, use the **Help > Server Mode Info** menu item in the application, which provides detailed information and instructions including Docker deployment options.
+
+## Active File Management
+
+By default Printventory is **passive**: it indexes your models wherever they already
+live and never moves anything. Active file management is an opt-in mode that turns
+that around — Printventory takes over filing, so downloads stop piling up in your
+Downloads folder.
+
+Open **Settings > Active File Management** to configure it.
+
+### How it works
+
+1. You nominate an **ingestion folder** (your inbox) and a **library folder** (where
+   things should end up — by default your STL Home).
+2. Everything at the top level of the ingestion folder is treated as one project:
+   a folder is a project, a ZIP is a project, and a loose `.stl`/`.3mf` is a project
+   of its own. Files Printventory does not recognise are left where they are.
+3. Printventory reads what it can about each project — a metadata JSON sidecar, the
+   Designer/Title/License embedded in a 3MF, a source URL in a README, and the
+   project's own name (`Dragon by CinderWing3D`).
+4. The project is **moved** into the library under the folder pattern you configured,
+   and the metadata is written onto the models it just indexed.
+
+### Projects move whole
+
+This is the part that separates it from a plain file mover: the entire project folder
+is moved as one unit. BOM files, assembly instructions, licence text, renders and
+sliced profiles stay next to the models they belong to instead of being orphaned.
+
+ZIP archives are fully extracted first and their contents filed together. A ZIP that
+wraps everything in a single top-level folder is unwrapped, so you get
+`Designer/Model/parts/...` rather than `Designer/Model/Model/parts/...`.
+
+### The folder pattern
+
+The library layout is described by a pattern string you can edit:
+
+```
+/(%category%|Uncategorized)/(%author%|Unknown)/%name%/
+```
+
+- `%token%` inserts a value from the model's metadata.
+- `(a|b|c)` uses the first option that resolves to something, so a plain word at the
+  end of a group acts as its fallback.
+- `/` starts a new folder level. A level that comes out empty is dropped rather than
+  left as a blank folder.
+- Anything else is literal text, so `%author% - %name%` is a valid single level.
+
+| Token | Value |
+| --- | --- |
+| `%author%` (or `%designer%`) | The model's designer |
+| `%name%` | The project name (parent model, or the folder it arrived in) |
+| `%category%` | The model's first tag |
+| `%license%` | The licence |
+| `%parent%` | The parent model |
+| `%source%` | The source URL |
+
+The dialog previews what your pattern produces, both for a model with full metadata
+and for one with none, so the fallbacks are visible before you commit to them.
+
+The default `/(%author%|Unknown Designer)/%name%/` lines up with the default
+folder-path metadata levels in STL Home settings, so the folders active file
+management writes are the same ones passive scanning reads back.
+
+### The library follows your edits
+
+The pattern is built out of metadata, so changing that metadata changes where a
+project belongs. Printventory keeps up automatically:
+
+- Editing a model's **designer, tags, licence or parent model** re-files that project
+  in the background — no prompt, no dialog. Folders left empty behind the move are
+  removed.
+- Changing the **pattern itself** re-files everything already in the library.
+
+The whole project folder moves each time, the database is rewritten to match, and the
+grid refreshes on its own.
+
+### Other settings
+
+| Setting | What it does |
+| --- | --- |
+| **Enable active file management** | Master switch. Off by default; nothing is moved while it is off. |
+| **Ingestion folder** | The inbox that gets emptied. Files here are moved out, not copied. |
+| **Library folder** | Where projects are filed. Leave empty to use STL Home. |
+| **If the destination already exists** | Keep both (numbered suffix), merge into the existing project folder, or leave the download in the inbox. |
+| **Extract ZIP files** | Expand archives and file their contents as one project. |
+| **Delete the ZIP afterwards** | Only ever happens after the contents have been filed successfully. |
+| **Run automatically every N minutes** | Unattended ingestion. `0` means manual only. |
+
+### Preview before you commit
+
+**Preview** performs a full dry run: every project is examined and its destination
+worked out, but nothing is moved. Use it after changing the structure to confirm
+where things will land. **Ingest Now** performs the real run and re-indexes the
+library afterwards.
+
+### Notes and limits
+
+- Metadata already filled in on a model is never overwritten — only empty fields are
+  filled from what ingestion learned.
+- A designer is only inferred from a name when the name states one (`Model by
+  Designer`). Ambiguous names are left to the pattern's fallback rather than guessed
+  at.
+- Each project is independent: one corrupt archive is reported and skipped, and the
+  rest of the queue still runs.
+- The ingestion folder and library folder may not contain one another.
+- In Docker, set the ingestion folder with the `INGEST_DIR` environment variable or
+  by typing the container path into the dialog; server mode has no native folder
+  picker.
 
 ## Building from Source
 
@@ -946,6 +1056,7 @@ To automatically mount on host reboot, add to `/etc/fstab`:
 - `slicer.js` - 3D model slicing and thumbnail generation
 - `guide.js` - Interactive guide system
 - `scan-worker.js` - Background worker for directory scanning
+- `ingest.js` - Active file management: ingestion planning and project moves
 
 ### Build & Configuration
 - `package.json` - Project configuration and dependencies
