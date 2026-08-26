@@ -21381,6 +21381,15 @@ function buildGroupedDisplayRecords(records, options) {
       return;
     }
 
+    // A model revealed by expanding an outer group already belongs to that group.
+    // Re-grouping it here produced a second card for the same set: expanding a folder
+    // bundle showed its parts, and those parts immediately collapsed back into a
+    // parent-model group sitting right next to the bundle they came out of.
+    if (record.parentGroupKey) {
+      groupedRecords.push(record);
+      return;
+    }
+
     const groupLabel = getGroupLabelFromModel(record.model);
     const groupKeyRaw = getGroupKeyFromModel(record.model);
     if (!groupLabel || !groupKeyRaw) {

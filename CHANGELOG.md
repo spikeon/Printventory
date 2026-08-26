@@ -10,6 +10,7 @@ All notable changes contributed via pull request are documented in this file.
 
 ### Fixed
 
+- Opening a project group showed a second, identical group card beside it instead of the project's files. The parts a group revealed were run through grouping again, and since ingestion records the project name as every part's parent model, they immediately reassembled into a parent-model group next to the bundle they had just come out of. A model revealed by expanding a group is now left alone.
 - The Quick Start guide reopened every run. Dismissing the welcome dialog triggered two handlers: one in `guide.js` that checks whether the guide has already been seen, and one inline in `index.html` that showed it unconditionally. The inline handler now only closes the welcome dialog, leaving `guide.js` as the single place that decides.
 
 ### Added

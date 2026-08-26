@@ -325,6 +325,48 @@ test.describe('Active file management', () => {
     expect(result.extrasLabels).toEqual([null]);
   });
 
+  test('expanding a project group shows its parts, not a second copy of itself', async () => {
+    // Ingestion records the project name as every part's parent model, which is what
+    // makes the revealed parts eligible to be grouped a second time. Show only this
+    // project so the assertion counts cards for it and nothing else.
+    await window.evaluate(async () => {
+      const models = await window.electron.getAllModels();
+      const parts = models.filter((m) => String(m.filePath).includes('Articulated Dragon'));
+      for (const part of parts) {
+        if (part.parentModel !== 'Articulated Dragon') {
+          await window.electron.saveModel({ ...part, parentModel: 'Articulated Dragon' });
+        }
+      }
+      const refreshed = await window.electron.getAllModels();
+      await window.displayModels(refreshed.filter((m) => String(m.filePath).includes('Articulated Dragon')));
+    });
+    await window.waitForTimeout(1500);
+
+    const groups = window.locator('.parent-model-group', { hasText: 'Articulated Dragon' });
+    await expect(groups).toHaveCount(1, { timeout: 30000 });
+
+    // Opening the group reveals its parts. Ingestion also records the project name as
+    // each part's parent model, so re-grouping the revealed parts would rebuild the very
+    // group they came out of and show it twice.
+    // Preview view is where this was reported, and its tiles are what get recycled.
+    await window.evaluate(() => {
+      const previewButton = Array.from(document.querySelectorAll('button'))
+        .find((b) => b.textContent.trim() === 'Preview');
+      if (previewButton) previewButton.click();
+    });
+    await window.waitForTimeout(1500);
+
+    // The grid re-renders as thumbnails arrive, so a plain click never settles.
+    await window.evaluate(() => document.querySelector('.parent-model-group')?.click());
+    await window.waitForTimeout(2000);
+
+    // The parts must not reassemble themselves into a second card beside the one they
+    // came out of. That second card was a parent-model group built from the very models
+    // the bundle had just revealed.
+    await expect(window.locator('.parent-model-group[data-group-kind="parentModel"]')).toHaveCount(0);
+    await expect(window.locator('.parent-model-group')).toHaveCount(1);
+  });
+
   test('re-files a project when metadata that feeds the pattern changes', async () => {
     const before = path.join(library, 'Uncategorized', 'CinderWing3D', 'Articulated Dragon');
     expect(fs.existsSync(before)).toBe(true);
