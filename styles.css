@@ -7410,6 +7410,7 @@ header {
 }
 .afm-results-table {
   width: 100%;
+  min-width: 34rem;
   border-collapse: collapse;
   font-size: 0.85em;
 }
@@ -7425,6 +7426,13 @@ header {
   position: sticky;
   top: 0;
   background: rgba(0, 0, 0, 0.4);
+  /* Headings squeeze into two lines without this ("Res ult", "Mode ls"). */
+  white-space: nowrap;
+}
+
+.afm-results-table td:nth-child(2),
+.afm-results-table td:nth-child(4) {
+  white-space: nowrap;
 }
 .afm-row-moved td:nth-child(2) { color: #6fcf97; }
 .afm-row-planned td:nth-child(2) { color: #f2c94c; }

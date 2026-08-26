@@ -187,6 +187,16 @@ Open **Settings > Active File Management** to configure it.
 4. The project is **moved** into the library under the folder pattern you configured,
    and the metadata is written onto the models it just indexed.
 
+### Ingested projects group in the library
+
+Printventory groups models from the same ZIP archive into one card. Active file
+management extends that to the folders it creates: because ingestion knows the folder
+it filed is a project, every model in it shares one group, so the project shows up as a
+single card you can expand rather than a scattering of parts.
+
+Only ingested projects group this way. A folder that merely happens to contain models
+still lists its files one by one, which is how ordinary scanning has always behaved.
+
 ### Projects move whole
 
 This is the part that separates it from a plain file mover: the entire project folder

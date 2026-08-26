@@ -1645,7 +1645,7 @@ function loadThumbnailForModel(filePath) {
   }
 }
 
-const MODEL_DETAIL_COLUMNS = 'id, filePath, fileName, designer, source, notes, printed, parentModel, hash, size, license, modifiedDate, dateAdded, isNew, rating, favorite, bundleKey, bundleLabel, bundleKind';
+const MODEL_DETAIL_COLUMNS = 'id, filePath, fileName, designer, source, notes, printed, parentModel, hash, size, license, modifiedDate, dateAdded, isNew, rating, favorite, bundleKey, bundleLabel, bundleKind, projectPath';
 
 /** List queries omit thumbnail blobs; these flags are computed without returning the column. */
 const MODEL_LIST_THUMB_FLAGS =
@@ -1656,7 +1656,7 @@ const MODEL_LIST_THUMB_FLAGS_QUALIFIED =
   "CASE WHEN models.thumbnail IS NOT NULL AND INSTR(models.thumbnail, '::') > 0 THEN 1 ELSE 0 END AS hasMultipleThumbnails";
 const MODEL_LIST_COLUMNS = `${MODEL_DETAIL_COLUMNS}, ${MODEL_LIST_THUMB_FLAGS}`;
 const MODEL_LIST_COLUMNS_QUALIFIED =
-  `models.id, models.filePath, models.fileName, models.designer, models.source, models.notes, models.printed, models.parentModel, models.hash, models.size, models.license, models.modifiedDate, models.dateAdded, models.isNew, models.rating, models.favorite, models.bundleKey, models.bundleLabel, models.bundleKind, ${MODEL_LIST_THUMB_FLAGS_QUALIFIED}`;
+  `models.id, models.filePath, models.fileName, models.designer, models.source, models.notes, models.printed, models.parentModel, models.hash, models.size, models.license, models.modifiedDate, models.dateAdded, models.isNew, models.rating, models.favorite, models.bundleKey, models.bundleLabel, models.bundleKind, models.projectPath, ${MODEL_LIST_THUMB_FLAGS_QUALIFIED}`;
 
 function applyThumbnailFlags(row) {
   if (!row) return row;
@@ -1981,6 +1981,15 @@ function initializeDatabase() {
           value TEXT
       )`).run();
       
+      // Projects created by active file management. A scan can index a project's files
+      // before or after ingestion records them, so the folders are remembered here and
+      // every model that lands inside one is stamped as part of that project.
+      db.prepare(`CREATE TABLE IF NOT EXISTS ingested_projects (
+          projectPath TEXT PRIMARY KEY,
+          label TEXT,
+          dateAdded DATETIME
+      )`).run();
+
       // Create slicers table
       db.prepare(`CREATE TABLE IF NOT EXISTS slicers (
           id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -9239,6 +9248,115 @@ function sendIngestEvent(channel, payload) {
   }
 }
 
+/** Cached list of ingested project folders, longest path first so nesting resolves. */
+let ingestedProjectsCache = null;
+
+function invalidateIngestedProjectsCache() {
+  ingestedProjectsCache = null;
+}
+
+function getIngestedProjects() {
+  if (ingestedProjectsCache) return ingestedProjectsCache;
+  try {
+    const rows = db.prepare('SELECT projectPath, label FROM ingested_projects').all();
+    ingestedProjectsCache = rows
+      .map((row) => ({
+        projectPath: row.projectPath,
+        label: row.label,
+        match: normalizePath(row.projectPath).replace(/\/+$/, '').toLowerCase()
+      }))
+      .filter((row) => row.match)
+      .sort((a, b) => b.match.length - a.match.length);
+  } catch (error) {
+    ingestedProjectsCache = [];
+  }
+  return ingestedProjectsCache;
+}
+
+function rememberIngestedProject(projectPath) {
+  if (!projectPath) return;
+  try {
+    db.prepare(`
+      INSERT INTO ingested_projects (projectPath, label, dateAdded) VALUES (?, ?, ?)
+      ON CONFLICT(projectPath) DO UPDATE SET label = excluded.label
+    `).run(projectPath, path.basename(projectPath), new Date().toISOString());
+    invalidateIngestedProjectsCache();
+  } catch (error) {
+    console.error('[Ingest] Could not record project', projectPath, error);
+  }
+}
+
+function forgetIngestedProject(projectPath) {
+  if (!projectPath) return;
+  try {
+    db.prepare('DELETE FROM ingested_projects WHERE projectPath = ?').run(projectPath);
+    invalidateIngestedProjectsCache();
+  } catch (error) {
+    // best effort
+  }
+}
+
+/** The ingested project a file belongs to, or null when it is not inside one. */
+function findIngestedProjectForPath(filePath) {
+  const onDisk = String(filePath || '');
+  if (!onDisk || onDisk.startsWith('url::')) return null;
+  const diskPath = onDisk.includes('::') ? onDisk.split('::')[0] : onDisk;
+  const normalized = normalizePath(diskPath).toLowerCase();
+  for (const project of getIngestedProjects()) {
+    if (normalized.startsWith(project.match + '/')) return project;
+  }
+  return null;
+}
+
+/**
+ * Stamp freshly indexed files with the project they landed in.
+ *
+ * Scanning and ingestion do not run in a fixed order — a scan can index a project's
+ * files before ingestion gets to write its metadata — so membership is applied here,
+ * where the files actually enter the library.
+ */
+function stampIngestedProjectFields(filePaths) {
+  const paths = (Array.isArray(filePaths) ? filePaths : [filePaths]).filter(Boolean);
+  if (paths.length === 0 || getIngestedProjects().length === 0) return 0;
+  const update = db.prepare(`
+    UPDATE models SET projectPath = ?, bundleKey = ?, bundleLabel = ?, bundleKind = ?
+    WHERE filePath = ?
+  `);
+  let stamped = 0;
+  const apply = db.transaction(() => {
+    for (const filePath of paths) {
+      // A model inside a ZIP keeps the archive's own bundle.
+      if (String(filePath).includes('::')) continue;
+      const project = findIngestedProjectForPath(filePath);
+      if (!project) continue;
+      const bundle = folderBundleFieldsForProject(project.projectPath);
+      update.run(project.projectPath, bundle.bundleKey, bundle.bundleLabel, bundle.bundleKind, filePath);
+      stamped++;
+    }
+  });
+  try {
+    apply();
+  } catch (error) {
+    console.error('[Ingest] Could not stamp project membership:', error);
+  }
+  return stamped;
+}
+
+/**
+ * Bundle fields that make one ingested project group as a single card in the grid.
+ * Printventory only bundles ZIP archives on its own; a project folder is bundled here
+ * because ingestion knows it is a project, not merely a folder that holds files.
+ */
+function folderBundleFieldsForProject(projectPath) {
+  const normalized = normalizePath(projectPath || '').replace(/\/+$/, '');
+  if (!normalized) return { bundleKey: null, bundleLabel: null, bundleKind: null };
+  return {
+    bundleKey: `folder:${normalized.toLowerCase()}`,
+    bundleLabel: path.basename(normalized) || normalized,
+    bundleKind: 'folder'
+  };
+}
+
 /**
  * Write the metadata that chose each destination back onto the models now indexed
  * there. Only empty fields are filled, so anything the user typed always wins.
@@ -9248,12 +9366,16 @@ function applyIngestMetadataToLibrary(results) {
   let updated = 0;
 
   const selectStmt = db.prepare(`
-    SELECT id, designer, source, license, notes, parentModel, projectPath FROM models
+    SELECT id, filePath, designer, source, license, notes, parentModel, projectPath,
+           bundleKey, bundleLabel, bundleKind
+    FROM models
     WHERE REPLACE(LOWER(filePath), CHAR(92), '/') LIKE ?
   `);
-  const updateStmt = db.prepare(
-    'UPDATE models SET designer = ?, source = ?, license = ?, notes = ?, parentModel = ?, projectPath = ? WHERE id = ?'
-  );
+  const updateStmt = db.prepare(`
+    UPDATE models SET designer = ?, source = ?, license = ?, notes = ?, parentModel = ?, projectPath = ?,
+      bundleKey = ?, bundleLabel = ?, bundleKind = ?
+    WHERE id = ?
+  `);
 
   const isEmpty = (value) => value == null || String(value).trim() === '';
 
@@ -9277,12 +9399,26 @@ function applyIngestMetadataToLibrary(results) {
       // Remember the project this model arrived in so a later metadata edit can move the
       // whole folder rather than having to guess where the project starts.
       const projectPath = result.destination;
+
+      // Group the project as one card. Models inside a ZIP keep their archive bundle.
+      const isZipEntry = String(row.filePath || '').includes('::');
+      const bundle = isZipEntry
+        ? { bundleKey: row.bundleKey, bundleLabel: row.bundleLabel, bundleKind: row.bundleKind }
+        : folderBundleFieldsForProject(projectPath);
+
       if (designer === row.designer && source === row.source && license === row.license
-        && notes === row.notes && parentModel === row.parentModel && projectPath === row.projectPath) {
+        && notes === row.notes && parentModel === row.parentModel && projectPath === row.projectPath
+        && bundle.bundleKey === row.bundleKey && bundle.bundleLabel === row.bundleLabel
+        && bundle.bundleKind === row.bundleKind) {
         continue;
       }
       try {
-        updateStmt.run(designer || null, source || null, license || null, notes || null, parentModel || null, projectPath || null, row.id);
+        updateStmt.run(
+          designer || null, source || null, license || null, notes || null,
+          parentModel || null, projectPath || null,
+          bundle.bundleKey || null, bundle.bundleLabel || null, bundle.bundleKind || null,
+          row.id
+        );
         updated++;
       } catch (error) {
         console.error('[Ingest] Error updating model', row.id, error);
@@ -9321,7 +9457,35 @@ async function runIngestPass({ dryRun = false } = {}) {
     onProgress: (progress) => sendIngestEvent('ingest-progress', progress)
   });
 
+  // Remember the folders ingestion created so a scan can attribute files to them
+  // whenever it happens to run.
+  if (!dryRun) {
+    for (const result of summary.results || []) {
+      if (result && result.status === 'moved' && result.destination) {
+        rememberIngestedProject(result.destination);
+      }
+    }
+    // Files already indexed under those folders get their membership right away.
+    stampProjectFieldsForKnownProjects(summary.results || []);
+  }
+
   return summary;
+}
+
+/** Apply project membership to every model already indexed under a freshly filed project. */
+function stampProjectFieldsForKnownProjects(results) {
+  for (const result of results || []) {
+    if (!result || result.status !== 'moved' || !result.destination) continue;
+    try {
+      const rows = db.prepare(`
+        SELECT filePath FROM models
+        WHERE REPLACE(LOWER(filePath), CHAR(92), '/') LIKE ?
+      `).all(directoryScanPrefixSqlParam(result.destination));
+      stampIngestedProjectFields(rows.map((row) => row.filePath));
+    } catch (error) {
+      console.error('[Ingest] Could not stamp models under', result.destination, error);
+    }
+  }
 }
 
 const runIngestHandler = async (event, options = {}) => {
@@ -9478,11 +9642,16 @@ function pruneEmptyDirectories(startDir, stopRoot) {
 /** Rewrite every stored path that lived under `fromDir` so it points into `toDir`. */
 function rewriteModelPaths(fromDir, toDir) {
   const rows = db.prepare(`
-    SELECT id, filePath FROM models
+    SELECT id, filePath, bundleKey, bundleLabel, bundleKind FROM models
     WHERE REPLACE(LOWER(filePath), CHAR(92), '/') LIKE ?
   `).all(directoryScanPrefixSqlParam(fromDir));
-  const update = db.prepare('UPDATE models SET filePath = ?, projectPath = ? WHERE id = ?');
+  const update = db.prepare(`
+    UPDATE models SET filePath = ?, projectPath = ?, bundleKey = ?, bundleLabel = ?, bundleKind = ?
+    WHERE id = ?
+  `);
   const fromNormalized = normalizePath(fromDir).replace(/\/+$/, '');
+  // The project's group is keyed on its folder, so a move has to re-key it too.
+  const movedBundle = folderBundleFieldsForProject(toDir);
   let moved = 0;
   const apply = db.transaction(() => {
     for (const row of rows) {
@@ -9490,7 +9659,11 @@ function rewriteModelPaths(fromDir, toDir) {
       const remainder = normalizePath(original).slice(fromNormalized.length);
       const rebuilt = normalizePath(toDir).replace(/\/+$/, '') + remainder;
       const next = process.platform === 'win32' ? rebuilt.replace(/\//g, '\\') : rebuilt;
-      update.run(next, toDir, row.id);
+      const isZipEntry = original.includes('::');
+      const bundle = isZipEntry
+        ? { bundleKey: row.bundleKey, bundleLabel: row.bundleLabel, bundleKind: row.bundleKind }
+        : movedBundle;
+      update.run(next, toDir, bundle.bundleKey || null, bundle.bundleLabel || null, bundle.bundleKind || null, row.id);
       moved++;
     }
   });
@@ -9577,6 +9750,8 @@ async function reorganizeOneProject(projectDir, settings, priorityIds) {
   }
 
   rewriteModelPaths(projectDir, target);
+  forgetIngestedProject(projectDir);
+  rememberIngestedProject(target);
   pruneEmptyDirectories(previousParent, root);
   console.log('[Active File Management] Re-filed', projectDir, '->', target);
   return target;
@@ -11317,6 +11492,8 @@ async function saveModelBatch(modelDataBatch) {
     });
     
     transaction();
+    // Files can be indexed before or after ingestion records their project folder.
+    stampIngestedProjectFields(modelDataBatch.map((modelData) => modelData && modelData.filePath));
     scheduleBackgroundHashGeneration('save-model-batch');
     return true;
   } catch (error) {

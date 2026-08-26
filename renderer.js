@@ -1898,25 +1898,33 @@ function deriveBundleFieldsForModel(model) {
   return { bundleKey: `zip:${normalized}`, bundleLabel: label, bundleKind: 'zip' };
 }
 
-function isZipBundleModel(model) {
+/**
+ * True when a model belongs to a bundle group.
+ *
+ * ZIP members are bundled from the archive they live in. Folder bundles are never
+ * derived from a folder — they are only ever set deliberately, by ingestion, for the
+ * project folder a download was filed into. An ordinary scanned folder therefore still
+ * lists its files one by one, which is the behaviour folder bundles were removed for.
+ */
+function isBundleModel(model) {
   const kind = String(model?.bundleKind || '').trim().toLowerCase();
-  if (kind === 'zip') return true;
-  if (kind === 'folder') return false;
   const key = String(model?.bundleKey || '').trim().toLowerCase();
+  if (kind === 'zip') return true;
+  if (kind === 'folder') return Boolean(key);
   if (key.startsWith('zip:')) return true;
-  if (key.startsWith('folder:')) return false;
+  if (key.startsWith('folder:')) return true;
   const filePath = model?.filePath || '';
   return Boolean(filePath.includes('::') && !filePath.startsWith('url::'));
 }
 
 function getBundleGroupLabel(model) {
-  if (!isZipBundleModel(model)) return '';
+  if (!isBundleModel(model)) return '';
   if (model?.bundleLabel) return String(model.bundleLabel).trim();
   return deriveBundleFieldsForModel(model).bundleLabel;
 }
 
 function getBundleGroupKey(model) {
-  if (!isZipBundleModel(model)) return '';
+  if (!isBundleModel(model)) return '';
   if (model?.bundleKey) return String(model.bundleKey).trim().toLowerCase();
   return deriveBundleFieldsForModel(model).bundleKey;
 }
@@ -21840,6 +21848,10 @@ function getBundleContainerPath(groupRecord) {
   const bundleKind = first.bundleKind || deriveBundleFieldsForModel(first).bundleKind;
   if (bundleKind === 'zip' || first.filePath.includes('::')) {
     return { path: parseZipPath(first.filePath).zipPath, kind: 'zip' };
+  }
+  // An ingested project is the folder it was filed into, not the subfolder one part sits in.
+  if (bundleKind === 'folder' && first.projectPath) {
+    return { path: first.projectPath, kind: 'folder' };
   }
   const sep = Math.max(first.filePath.lastIndexOf('/'), first.filePath.lastIndexOf('\\'));
   return { path: sep >= 0 ? first.filePath.slice(0, sep) : first.filePath, kind: 'folder' };

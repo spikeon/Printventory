@@ -226,6 +226,32 @@ test.describe('Active file management', () => {
     expect(fs.existsSync(path.join(inbox, 'unrelated-notes.txt'))).toBe(true);
   });
 
+  test('an ingested project shows in the grid as one group', async () => {
+    // Ingestion knows the folder it created is a project, so it bundles it. A folder
+    // that merely happens to hold files is still listed file by file.
+    // Indexing carries on in the background after the ingest run reports done.
+    await expect
+      .poll(async () => window.evaluate(async () => {
+        const models = await window.electron.getAllModels();
+        const dragon = models.filter((m) => String(m.filePath).includes('Articulated Dragon'));
+        if (dragon.length < 2) return 'not indexed yet';
+        const keys = new Set(dragon.map((m) => m.bundleKey || ''));
+        if (keys.size !== 1 || keys.has('')) return 'not grouped yet';
+        const rightFields = dragon.every((m) => m.bundleKind === 'folder' && m.bundleLabel === 'Articulated Dragon');
+        return rightFields ? 'grouped' : 'wrong bundle fields';
+      }), { timeout: 90000, message: 'the ingested project should share one folder bundle' })
+      .toBe('grouped');
+
+    await window.evaluate(async () => {
+      const models = await window.electron.getAllModels();
+      await window.displayModels(models);
+    });
+
+    const group = window.locator('.parent-model-group[data-group-kind="bundle"]', { hasText: 'Articulated Dragon' });
+    await expect(group.first()).toBeVisible({ timeout: 30000 });
+    await expect(group.first().locator('.parent-model-group-meta')).toContainText('folder');
+  });
+
   test('re-files a project when metadata that feeds the pattern changes', async () => {
     const before = path.join(library, 'Uncategorized', 'CinderWing3D', 'Articulated Dragon');
     expect(fs.existsSync(before)).toBe(true);
