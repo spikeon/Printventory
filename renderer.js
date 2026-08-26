@@ -1178,6 +1178,26 @@ function getModelColor() {
 // Extensions that are valid for library (scan/add). Used for isValidFile.
 const EXTENSIONS_VALID_FOR_LIBRARY = new Set(['.stl', '.3mf', '.3ds', '.amf', '.blender', '.dae', '.dxf', '.dwg', '.fbx', '.f3d', '.f3z', '.gcode', '.igs', '.iges', '.lys', '.lyt', '.obj', '.ply', '.step', '.stp', '.svg', '.x3d']);
 
+/**
+ * Extensions we can turn into real 3D geometry rather than a typed placeholder.
+ * Mesh formats go through their Three.js loader; STEP/IGES are tessellated from B-rep
+ * by occt-import-js in parse-worker.js.
+ */
+const RENDERABLE_3D_EXTENSIONS = new Set(['stl', '3mf', 'obj', 'step', 'stp', 'igs', 'iges']);
+
+function isRenderable3DExtension(extension) {
+  return RENDERABLE_3D_EXTENSIONS.has(String(extension || '').toLowerCase().replace(/^\./, ''));
+}
+window.isRenderable3DExtension = isRenderable3DExtension;
+
+/** CAD B-rep formats: same pipeline as meshes, but tessellated first and much slower to read. */
+const CAD_BREP_EXTENSIONS = new Set(['step', 'stp', 'igs', 'iges']);
+
+function isCadBrepExtension(extension) {
+  return CAD_BREP_EXTENSIONS.has(String(extension || '').toLowerCase().replace(/^\./, ''));
+}
+window.isCadBrepExtension = isCadBrepExtension;
+
 // Map file extension (with or without dot) to label for typed placeholder
 const EXTENSION_TO_PLACEHOLDER_LABEL = {
   '3ds': '3DS', 'amf': 'AMF', 'blender': 'Blender', 'dae': 'DAE', 'dxf': 'DXF', 'dwg': 'DWG',
@@ -1243,8 +1263,9 @@ function isFailurePlaceholderThumbnail(thumb) {
   if (typeof thumb !== 'string' || !thumb.startsWith('data:image')) return false;
   try {
     if (thumb === generateCorruptedPlaceholder()) return true;
-    // Bulk-gen used to save typed STL/3MF/OBJ placeholders "to prevent future attempts"
-    for (const ext of ['stl', '3mf', 'obj']) {
+    // Bulk-gen used to save typed placeholders "to prevent future attempts"; a type we can
+    // now render for real must count as a failure so it gets another go.
+    for (const ext of RENDERABLE_3D_EXTENSIONS) {
       if (thumb === generateTypedPlaceholder(ext)) return true;
     }
   } catch (_) { /* ignore */ }
@@ -1384,8 +1405,8 @@ async function loadModel(filePath, options = {}) {
       return null;
     }
     
-    // Only STL, 3MF, and OBJ are loadable for 3D preview; other types use typed placeholder
-    if (fileExtension !== 'stl' && fileExtension !== '3mf' && fileExtension !== 'obj') {
+    // Mesh and CAD formats load as real geometry; everything else uses a typed placeholder
+    if (!isRenderable3DExtension(fileExtension)) {
       return null;
     }
     
@@ -1512,7 +1533,7 @@ async function loadModel(filePath, options = {}) {
     }
     
     // If no embedded image found, proceed with 3D loading using Web Worker
-    if (fileExtension !== 'stl' && fileExtension !== '3mf' && fileExtension !== 'obj') {
+    if (!isRenderable3DExtension(fileExtension)) {
       throw new Error(`Unsupported file type: ${fileExtension}`);
     }
 
@@ -1590,7 +1611,8 @@ async function loadModel(filePath, options = {}) {
             return;
           }
 
-          if (fileExtension === 'stl' || fileExtension === '3mf' || fileExtension === 'obj') {
+          // Every format we load is authored Z-up; the viewer is Y-up.
+          if (isRenderable3DExtension(fileExtension)) {
             group.rotation.x = -Math.PI / 2;
           }
 
@@ -12741,8 +12763,8 @@ document.addEventListener('DOMContentLoaded', async () => {
         const fileExt = pathForExt.split('.').pop().toLowerCase();
         
         try {
-          // 0. Non-previewable types: use typed placeholder (file type label)
-          if (fileExt !== 'stl' && fileExt !== '3mf' && fileExt !== 'obj' && fileExt !== 'svg') {
+          // 0. Non-renderable types: use typed placeholder (file type label)
+          if (!isRenderable3DExtension(fileExt) && fileExt !== 'svg') {
             thumbnail = generateTypedPlaceholder(fileExt);
             await window.electron.saveThumbnail(model.filePath, thumbnail);
             if (!skipHash && (!model.hash || model.hash === '')) {
@@ -14892,8 +14914,8 @@ async function renderModelToPNG(filePath, container, existingThumbnail, options 
     }
   }
 
-  // Non-previewable types: show typed placeholder (file type label on image)
-  if (fileExtension !== 'stl' && fileExtension !== '3mf' && fileExtension !== 'obj' && fileExtension !== 'svg') {
+  // Non-renderable types: show typed placeholder (file type label on image)
+  if (!isRenderable3DExtension(fileExtension) && fileExtension !== 'svg') {
     const dataUrl = generateTypedPlaceholder(fileExtension);
     const img = document.createElement('img');
     img.src = dataUrl;

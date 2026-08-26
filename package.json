@@ -29,6 +29,7 @@
     "test": "playwright test",
     "test:bundle": "node bundle-keys.test.js",
     "test:ingest": "node ingest.test.js",
+    "test:step": "node step-metadata.test.js",
     "test:afm": "playwright test active-file-management.spec.js",
     "test:full": "playwright test full-app-e2e.spec.js",
     "test:dedup-stress": "node tests/dedup-stress-test.js"
@@ -113,6 +114,7 @@
       "main.js",
       "bundle-keys.js",
       "ingest.js",
+      "step-metadata.js",
       "preload.js",
       "renderer.js",
       "index.html",
@@ -155,6 +157,7 @@
   },
   "devDependencies": {
     "@playwright/test": "^1.57.0",
+    "occt-import-js": "^0.0.23",
     "electron": "^43.1.0",
     "electron-builder": "^26.5.0",
     "testdriverai": "^7.9.3",

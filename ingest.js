@@ -22,6 +22,9 @@ const path = require('path');
 /** Folder created inside the ingestion directory for staging zip extractions. */
 const STAGING_DIR_NAME = '.printventory-ingest';
 
+/** CAD formats whose header carries exporter metadata worth reading during ingest. */
+const CAD_METADATA_EXTENSIONS = new Set(['.step', '.stp', '.igs', '.iges']);
+
 /** Files that should never block a project from being considered empty/complete. */
 const JUNK_ENTRY_NAMES = new Set(['.ds_store', 'thumbs.db', 'desktop.ini', '__macosx']);
 
@@ -420,7 +423,7 @@ async function mergeDirectoryInto(source, destination) {
  * sidecar JSON, a source URL from a README, and the project's own name.
  * Deeper metadata (3MF Designer/Title/License) comes from the injected extractor.
  */
-async function collectProjectMetadata({ projectDir, projectName, modelFiles, extract3MFMetadata }) {
+async function collectProjectMetadata({ projectDir, projectName, modelFiles, extract3MFMetadata, extractCadMetadata }) {
   const fromName = parseNameForMetadata(projectName);
   const meta = {
     designer: fromName.designer || null,
@@ -497,6 +500,24 @@ async function collectProjectMetadata({ projectDir, projectName, modelFiles, ext
     if (meta.modelFrom3MF && modelFiles.length === 1) meta.model = meta.modelFrom3MF;
   }
 
+  // STEP/IGES headers record who exported the model — the one thing about a CAD file
+  // that cannot be recovered from its geometry.
+  if (!meta.designer && typeof extractCadMetadata === 'function') {
+    const cadFiles = modelFiles.filter((f) => CAD_METADATA_EXTENSIONS.has(path.extname(f).toLowerCase()));
+    for (const file of cadFiles) {
+      let cad = null;
+      try {
+        cad = await extractCadMetadata(file);
+      } catch (error) {
+        cad = null;
+      }
+      if (cad && cad.designer && String(cad.designer).trim()) {
+        meta.designer = String(cad.designer).trim();
+        break;
+      }
+    }
+  }
+
   if (!meta.model) meta.model = cleanProjectName(projectName) || 'Model';
   return meta;
 }
@@ -518,6 +539,7 @@ async function runIngest(options) {
     deleteZipAfterExtract = true,
     dryRun = false,
     extract3MFMetadata = null,
+    extractCadMetadata = null,
     extractZip = null,
     onProgress = null,
   } = options || {};
@@ -612,6 +634,7 @@ async function runIngest(options) {
         projectName,
         modelFiles,
         extract3MFMetadata,
+        extractCadMetadata,
       });
       result.metadata = meta;
 
@@ -706,6 +729,7 @@ async function runIngest(options) {
 
 module.exports = {
   INGEST_DEFAULTS,
+  CAD_METADATA_EXTENSIONS,
   DEFAULT_PATTERN,
   PATTERN_TOKENS,
   STAGING_DIR_NAME,

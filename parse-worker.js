@@ -12,6 +12,57 @@ importScripts('vendor/worker-xmldom-queryselector-polyfill.js');
 importScripts('vendor/3MFLoader.js');
 importScripts('vendor/OBJLoader.js');
 
+/**
+ * STEP / IGES are B-rep (analytic surfaces), not meshes, so they have to be tessellated
+ * before anything can be drawn. occt-import-js is an OpenCascade build that does that;
+ * it is loaded lazily because the WASM payload is large and most models never need it.
+ */
+let occtPromise = null;
+function loadOcct() {
+  if (occtPromise) return occtPromise;
+  occtPromise = (async () => {
+    importScripts('vendor/occt/occt-import-js.js');
+    if (typeof occtimportjs !== 'function') {
+      throw new Error('CAD importer failed to load');
+    }
+    return occtimportjs({
+      locateFile: (file) => new URL('vendor/occt/' + file, self.location.href).href
+    });
+  })();
+  return occtPromise;
+}
+
+/** Turn an occt-import-js result into the same geometry payload the mesh loaders produce. */
+function geometriesFromOcctResult(result) {
+  const geometries = [];
+  const transferables = [];
+  const meshes = (result && result.meshes) || [];
+
+  for (const mesh of meshes) {
+    const attributes = mesh && mesh.attributes;
+    const rawPosition = attributes && attributes.position && attributes.position.array;
+    if (!rawPosition || rawPosition.length < 9) continue;
+
+    const position = rawPosition instanceof Float32Array ? rawPosition : new Float32Array(rawPosition);
+    const rawNormal = attributes.normal && attributes.normal.array;
+    const normal = rawNormal
+      ? (rawNormal instanceof Float32Array ? rawNormal : new Float32Array(rawNormal))
+      : null;
+    const rawIndex = mesh.index && mesh.index.array;
+    const index = rawIndex
+      ? (rawIndex instanceof Uint32Array ? rawIndex : new Uint32Array(rawIndex))
+      : null;
+
+    transferables.push(position.buffer);
+    if (normal) transferables.push(normal.buffer);
+    if (index) transferables.push(index.buffer);
+
+    geometries.push({ position, normal, uv: null, index, matrix: null });
+  }
+
+  return { geometries, transferables };
+}
+
 function workerErrorMessage(error) {
   if (!error) return 'Unknown worker parse error';
   if (typeof error === 'string') return error;
@@ -72,6 +123,22 @@ self.onmessage = async function(e) {
         : await fetchText(url);
       const object = loader.parse(text);
       processObject(object, id);
+    } else if (fileExtension === 'step' || fileExtension === 'stp'
+      || fileExtension === 'igs' || fileExtension === 'iges') {
+      const occt = await loadOcct();
+      const buffer = modelBuffer instanceof ArrayBuffer ? modelBuffer : await fetchArrayBuffer(url);
+      const bytes = new Uint8Array(buffer);
+      const isIges = fileExtension === 'igs' || fileExtension === 'iges';
+      const result = isIges ? occt.ReadIgesFile(bytes, null) : occt.ReadStepFile(bytes, null);
+      if (!result || !result.success) {
+        throw new Error(`Could not read ${fileExtension.toUpperCase()} file`);
+      }
+      const { geometries, transferables } = geometriesFromOcctResult(result);
+      if (geometries.length === 0) {
+        self.postMessage({ id, success: false, error: 'No solid geometry found in CAD file' });
+        return;
+      }
+      self.postMessage({ id, success: true, geometries }, transferables);
     } else {
       throw new Error(`Unsupported file type: ${fileExtension}`);
     }

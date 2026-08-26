@@ -470,6 +470,18 @@ console.log('[Preview] preview.js script loaded');
     return hasColor;
   }
 
+  /** The standard look for geometry that carries no colour of its own (STL, CAD). */
+  function buildPreviewMaterial() {
+    return new THREE.MeshStandardMaterial({
+      color: 0x4a9eff,
+      metalness: 0.3,
+      roughness: 0.6,
+      flatShading: false,
+      emissive: 0x002244,
+      emissiveIntensity: 0.2
+    });
+  }
+
   function applyDefaultMetalMaterial(object) {
     const material = new THREE.MeshStandardMaterial({
       color: 0x4a4a4a,
@@ -542,9 +554,95 @@ console.log('[Preview] preview.js script loaded');
     return pathForExt.split('.').pop().toLowerCase();
   }
 
+  /** CAD B-rep formats are tessellated by the shared parse worker before they can be drawn. */
+  const PREVIEW_CAD_EXTENSIONS = new Set(['step', 'stp', 'igs', 'iges']);
+
+  function isCadPreviewExtension(ext) {
+    return PREVIEW_CAD_EXTENSIONS.has(String(ext || '').toLowerCase());
+  }
+
   function isPreviewableModelPath(filePath) {
     const ext = getPreviewExtension(filePath);
-    return ext === 'stl' || ext === '3mf';
+    return ext === 'stl' || ext === '3mf' || isCadPreviewExtension(ext);
+  }
+
+  /**
+   * Tessellate a CAD file in parse-worker.js and rebuild it as a Three.js group.
+   * Reading B-rep is slow, so this always runs off the main thread.
+   */
+  function loadCadObjectViaWorker(filePath, ext, loadToken) {
+    return new Promise((resolve, reject) => {
+      let worker;
+      try {
+        worker = new Worker('parse-worker.js');
+      } catch (error) {
+        reject(new Error('Could not start the CAD importer'));
+        return;
+      }
+      const jobId = `${Date.now()}_${Math.random().toString(16).slice(2)}`;
+
+      const finish = (fn, value) => {
+        try { worker.terminate(); } catch (_) { /* ignore */ }
+        fn(value);
+      };
+
+      worker.onmessage = (event) => {
+        const data = event.data;
+        if (!data || data.id !== jobId) return;
+        if (loadToken !== previewLoadToken) {
+          finish(reject, new Error('Preview cancelled'));
+          return;
+        }
+        if (!data.success) {
+          finish(reject, new Error(data.error || `Failed to read ${ext.toUpperCase()} file`));
+          return;
+        }
+
+        const group = new THREE.Group();
+        for (const geoData of data.geometries || []) {
+          if (!geoData.position || geoData.position.length < 9) continue;
+          const geometry = new THREE.BufferGeometry();
+          geometry.setAttribute('position', new THREE.BufferAttribute(geoData.position, 3));
+          if (geoData.normal && geoData.normal.length >= geoData.position.length) {
+            geometry.setAttribute('normal', new THREE.BufferAttribute(geoData.normal, 3));
+          }
+          if (geoData.index) geometry.setIndex(new THREE.BufferAttribute(geoData.index, 1));
+          if (!geometry.attributes.normal) geometry.computeVertexNormals();
+          geometry.computeBoundingBox();
+          geometry.computeBoundingSphere();
+          // CAD carries no print colours, so it gets the same finish as an STL.
+          group.add(new THREE.Mesh(geometry, buildPreviewMaterial()));
+        }
+
+        if (group.children.length === 0) {
+          finish(reject, new Error('No solid geometry found in CAD file'));
+          return;
+        }
+        group.rotation.x = -Math.PI / 2;
+        finish(resolve, group);
+      };
+
+      worker.onerror = (error) => {
+        finish(reject, new Error(error && error.message ? error.message : 'CAD importer failed'));
+      };
+
+      window.electron.readModelFile(filePath)
+        .then((raw) => {
+          if (loadToken !== previewLoadToken) {
+            finish(reject, new Error('Preview cancelled'));
+            return;
+          }
+          const arrayBuffer = raw instanceof ArrayBuffer
+            ? raw
+            : (raw && raw.buffer ? raw.buffer.slice(raw.byteOffset, raw.byteOffset + raw.byteLength) : null);
+          if (!arrayBuffer) {
+            finish(reject, new Error('Could not read CAD file'));
+            return;
+          }
+          worker.postMessage({ id: jobId, fileExtension: ext, arrayBuffer }, [arrayBuffer]);
+        })
+        .catch((error) => finish(reject, error));
+    });
   }
 
   function applyPartTint(object, index, total) {
@@ -573,8 +671,17 @@ console.log('[Preview] preview.js script loaded');
     }
 
     const ext = getPreviewExtension(filePath);
-    if (ext !== 'stl' && ext !== '3mf') {
+    if (ext !== 'stl' && ext !== '3mf' && !isCadPreviewExtension(ext)) {
       throw new Error(`Unsupported file type: ${ext}`);
+    }
+
+    if (isCadPreviewExtension(ext)) {
+      const loading = document.getElementById('preview-loading');
+      if (loading && loading.querySelector('p')) {
+        loading.querySelector('p').textContent =
+          `Reading ${ext.toUpperCase()} file...\nCAD files are converted to a mesh, which takes longer than STL.`;
+      }
+      return await loadCadObjectViaWorker(filePath, ext, loadToken);
     }
 
     if (ext === 'stl') {
@@ -598,16 +705,7 @@ console.log('[Preview] preview.js script loaded');
       geometry.computeBoundingBox();
       geometry.computeBoundingSphere();
 
-      const material = new THREE.MeshStandardMaterial({
-        color: 0x4a9eff,
-        metalness: 0.3,
-        roughness: 0.6,
-        flatShading: false,
-        emissive: 0x002244,
-        emissiveIntensity: 0.2
-      });
-
-      return new THREE.Mesh(geometry, material);
+      return new THREE.Mesh(geometry, buildPreviewMaterial());
     }
 
     const loading = document.getElementById('preview-loading');
@@ -673,8 +771,8 @@ console.log('[Preview] preview.js script loaded');
     fileType.textContent = `Type: ${ext.toUpperCase()}`;
     console.log('Loading model type:', ext);
 
-    if (ext !== 'stl' && ext !== '3mf') {
-      throw new Error('Preview not available for this file type. Only STL and 3MF models can be previewed in 3D.');
+    if (ext !== 'stl' && ext !== '3mf' && !isCadPreviewExtension(ext)) {
+      throw new Error('Preview not available for this file type. STL, 3MF, STEP and IGES models can be previewed in 3D.');
     }
 
     const object = await createPreviewObjectFromPath(filePath, loadToken);
@@ -690,7 +788,7 @@ console.log('[Preview] preview.js script loaded');
     const children = groupRecord?.children || [];
     const previewable = children.filter((child) => child?.filePath && isPreviewableModelPath(child.filePath));
     if (!previewable.length) {
-      alert('No STL or 3MF models in this bundle to preview.');
+      alert('No previewable models in this bundle.');
       return;
     }
 

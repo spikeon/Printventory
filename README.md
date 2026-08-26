@@ -11,6 +11,7 @@ Printventory is an Electron-based desktop application for managing your 3D print
 ### Core Functionality
 - **Directory Scanning**: Automatically scan and catalog STL and 3MF files (up to 50MB per file)
 - **3D Model Preview**: View thumbnails of your 3D models with customizable background colors
+- **CAD Support (STEP / IGES)**: STEP and IGES files are tessellated on the fly, so they get real 3D thumbnails and open in the full 3D preview like an STL — no placeholder cards. Enable them under Settings > File Type
 - **File Management**: Quick access to file locations, delete files with database cleanup
 - **Database Backup & Restore**: Protect your data with backup and restore functionality
 
@@ -1060,11 +1061,23 @@ To automatically mount on host reboot, add to `/etc/fstab`:
 - `guide.js` - Interactive guide system
 - `scan-worker.js` - Background worker for directory scanning
 - `ingest.js` - Active file management: ingestion planning and project moves
+- `step-metadata.js` - Reads the STEP (ISO 10303-21) header for exporter/designer information
+- `parse-worker.js` - Background worker for model parsing, including STEP/IGES tessellation
+- `vendor/occt/` - occt-import-js (OpenCascade, WebAssembly) used to convert CAD B-rep to meshes
 
 ### Build & Configuration
 - `package.json` - Project configuration and dependencies
 - `playwright.config.js` - Testing configuration
 - `installer.nsh` - Windows installer customizations
+
+## Third-Party Components
+
+Printventory itself is MIT licensed (see `LICENSE.txt`). CAD support additionally bundles:
+
+- **occt-import-js** (`vendor/occt/`) — a WebAssembly build of Open CASCADE Technology, used to
+  tessellate STEP and IGES files. Both occt-import-js and OCCT are **LGPL-2.1**; their licence
+  texts ship alongside the binary in `vendor/occt/`. It is loaded as a separate WebAssembly
+  module and can be replaced or removed without rebuilding the rest of the application.
 
 ## Technology Stack
 

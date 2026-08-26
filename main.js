@@ -885,7 +885,9 @@ ${bridgeCode}
         '.svg': 'image/svg+xml',
         '.ico': 'image/x-icon',
         '.bmp': 'image/bmp',
-        '.webp': 'image/webp'
+        '.webp': 'image/webp',
+        // The CAD importer streams its WebAssembly; the right type lets the browser compile it as it downloads.
+        '.wasm': 'application/wasm'
       };
       if (mimeTypes[ext]) {
         res.setHeader('Content-Type', mimeTypes[ext]);
@@ -896,7 +898,7 @@ ${bridgeCode}
   // Handle 404 - serve index.html for SPA routing (with bridge injection)
   expressApp.get('*', (req, res) => {
     // Missing static files: express.static already called next(); respond or the client hangs (blocks parser on <script src>)
-    if (req.path.match(/\.(js|css|png|jpg|jpeg|gif|svg|ico|bmp|webp|json)$/)) {
+    if (req.path.match(/\.(js|css|png|jpg|jpeg|gif|svg|ico|bmp|webp|json|wasm)$/)) {
       res.status(404).type('text/plain').send('Not Found');
       return;
     }
@@ -1340,7 +1342,9 @@ function startElectronUiServer() {
         '.svg': 'image/svg+xml',
         '.ico': 'image/x-icon',
         '.bmp': 'image/bmp',
-        '.webp': 'image/webp'
+        '.webp': 'image/webp',
+        // The CAD importer streams its WebAssembly; the right type lets the browser compile it as it downloads.
+        '.wasm': 'application/wasm'
       };
       if (mimeTypes[ext]) {
         res.setHeader('Content-Type', mimeTypes[ext]);
@@ -1349,7 +1353,7 @@ function startElectronUiServer() {
   }));
 
   expressApp.get('*', (req, res) => {
-    if (req.path.match(/\.(js|css|png|jpg|jpeg|gif|svg|ico|bmp|webp|json)$/)) {
+    if (req.path.match(/\.(js|css|png|jpg|jpeg|gif|svg|ico|bmp|webp|json|wasm)$/)) {
       res.status(404).type('text/plain').send('Not Found');
       return;
     }
@@ -9120,6 +9124,29 @@ ipcMain.handle('pull-3mf-metadata', async (event, filePaths) => {
 // ---------------------------------------------------------------------------
 
 const { runIngest: runIngestEngine, INGEST_DEFAULTS } = require('./ingest');
+const { extractStepMetadata, stepMetadataToModelFields } = require('./step-metadata');
+
+/** Read the first bytes of a file — enough for a STEP header, without loading the solid. */
+async function readFileHead(filePath, byteCount) {
+  const handle = await fs.promises.open(filePath, 'r');
+  try {
+    const buffer = Buffer.alloc(byteCount);
+    const { bytesRead } = await handle.read(buffer, 0, byteCount, 0);
+    return buffer.subarray(0, bytesRead);
+  } finally {
+    await handle.close();
+  }
+}
+
+/** Designer/organization recorded by whatever CAD package exported a STEP or IGES file. */
+async function extractCadMetadataForIngest(filePath) {
+  try {
+    const header = await extractStepMetadata(filePath, readFileHead);
+    return header ? stepMetadataToModelFields(header) : null;
+  } catch (error) {
+    return null;
+  }
+}
 
 const INGEST_SETTING_KEYS = {
   enabled: 'activeFileManagementEnabled',
@@ -9289,6 +9316,7 @@ async function runIngestPass({ dryRun = false } = {}) {
       const raw = await extract3MFMetadata(filePath);
       return raw ? filter3MFMetadataBySettings(raw) : null;
     },
+    extractCadMetadata: extractCadMetadataForIngest,
     extractZip: extractZipToDirectory,
     onProgress: (progress) => sendIngestEvent('ingest-progress', progress)
   });

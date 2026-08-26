@@ -819,7 +819,8 @@
         </div>
         <div class="settings-group">
           <h4>Additional file types to discover during scan</h4>
-          <p class="setting-description">These types will be discovered when scanning folders. Most do not support 3D preview; a placeholder with the file type (e.g. OBJ, STEP) will be shown and you can add your own images.</p>
+          <p class="setting-description">These types will be discovered when scanning folders. STEP, IGES and OBJ render real 3D thumbnails and open in the 3D preview; the remaining types show a placeholder with the file type and you can add your own images.</p>
+          <p class="setting-description">STEP and IGES store shapes as CAD surfaces rather than a mesh, so Printventory converts them before drawing. Expect the first thumbnail for a large assembly to take a few seconds.</p>
           <div id="scan-additional-types-container" class="scan-file-types-grid">
             <label class="scan-file-type-option"><input type="checkbox" id="scan-type-3ds"><span>3DS (.3ds)</span></label>
             <label class="scan-file-type-option"><input type="checkbox" id="scan-type-amf"><span>AMF (.amf)</span></label>

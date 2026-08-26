@@ -13,6 +13,9 @@ All notable changes contributed via pull request are documented in this file.
 - Preview (dry run) shows exactly where every item would go before anything is moved.
 - In a multi-part project whose models carry different metadata, the model you just edited decides the destination; the other models are left untouched.
 - Optional unattended ingestion on a timer, and `INGEST_DIR` support for Docker deployments.
+- STEP and IGES files are now first-class: they are tessellated with occt-import-js (a WebAssembly build of Open CASCADE, LGPL-2.1, bundled in `vendor/occt/`) so they render real 3D thumbnails and open in the full 3D preview instead of showing a typed placeholder.
+- Existing typed placeholders for any type Printventory can now render are treated as failures, so libraries scanned before this release regenerate real thumbnails on the next pass.
+- STEP headers are read during ingestion: the exporting author or organization becomes the designer when the file records one. The CAD document's internal name is deliberately ignored, since the downloaded file name is usually more descriptive.
 
 ## [2.2.1] - 2026-08-21
 
