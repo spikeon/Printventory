@@ -252,6 +252,29 @@ test.describe('Active file management', () => {
     await expect(group.first().locator('.parent-model-group-meta')).toContainText('folder');
   });
 
+  test('a library filed before grouping existed is brought up to date on launch', async () => {
+    // Simulate the older shape: files recorded as belonging to a project, but with no
+    // project record and no bundle fields, which is what an existing library looks like.
+    await window.evaluate(async () => {
+      const models = await window.electron.getAllModels();
+      const dragon = models.filter((m) => String(m.filePath).includes('Articulated Dragon'));
+      for (const model of dragon) {
+        await window.electron.saveModel({ ...model, bundleKey: null, bundleLabel: null, bundleKind: null });
+      }
+    });
+
+    const backfilled = await window.evaluate(async () => window.electron.backfillProjects());
+    expect(backfilled.grouped).toBeGreaterThan(0);
+
+    const grouped = await window.evaluate(async () => {
+      const models = await window.electron.getAllModels();
+      const dragon = models.filter((m) => String(m.filePath).includes('Articulated Dragon'));
+      return dragon.map((m) => m.bundleKind);
+    });
+    expect(grouped.length).toBeGreaterThan(1);
+    for (const kind of grouped) expect(kind).toBe('folder');
+  });
+
   test('re-files a project when metadata that feeds the pattern changes', async () => {
     const before = path.join(library, 'Uncategorized', 'CinderWing3D', 'Articulated Dragon');
     expect(fs.existsSync(before)).toBe(true);

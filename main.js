@@ -1856,6 +1856,13 @@ if (!gotTheLock) {
         scheduleBackgroundThumbnailCompression('startup');
       }
       
+      // Active file management: bring an existing library up to date, then arm the timer.
+      try {
+        backfillIngestedProjects();
+      } catch (backfillError) {
+        console.error('[Ingest] Project backfill failed:', backfillError);
+      }
+
       // Active file management: arm the unattended ingestion timer if the user enabled one.
       try {
         restartIngestAutoRun();
@@ -9343,6 +9350,47 @@ function stampIngestedProjectFields(filePaths) {
 }
 
 /**
+ * Libraries filed before ingested projects grouped have projectPath recorded on their
+ * models but no project record and no bundle fields, so their projects still show as
+ * loose parts. Register those folders once so an existing library gains the grouping
+ * without being re-imported.
+ */
+function backfillIngestedProjects() {
+  try {
+    if (!db || !db.prepare) return 0;
+    const done = db.prepare('SELECT value FROM settings WHERE key = ?')
+      .get('ingestedProjectsBackfillComplete')?.value;
+    if (done === '1') return 0;
+
+    const projects = db.prepare(`
+      SELECT DISTINCT projectPath FROM models
+      WHERE projectPath IS NOT NULL AND projectPath != ''
+    `).all();
+    for (const project of projects) {
+      rememberIngestedProject(project.projectPath);
+    }
+
+    const paths = db.prepare(`
+      SELECT filePath FROM models
+      WHERE projectPath IS NOT NULL AND projectPath != ''
+    `).all().map((row) => row.filePath);
+    const stamped = stampIngestedProjectFields(paths);
+
+    db.prepare(
+      `INSERT INTO settings (key, value) VALUES ('ingestedProjectsBackfillComplete', '1')
+       ON CONFLICT(key) DO UPDATE SET value = excluded.value`
+    ).run();
+    if (projects.length > 0) {
+      console.log(`[Ingest] Registered ${projects.length} existing project(s); grouped ${stamped} model(s)`);
+    }
+    return stamped;
+  } catch (error) {
+    console.error('[Ingest] Could not register existing projects:', error);
+    return 0;
+  }
+}
+
+/**
  * Bundle fields that make one ingested project group as a single card in the grid.
  * Printventory only bundles ZIP archives on its own; a project folder is bundled here
  * because ingestion knows it is a project, not merely a folder that holds files.
@@ -9685,10 +9733,17 @@ async function reorganizeOneProject(projectDir, settings, priorityIds) {
   `).all(directoryScanPrefixSqlParam(projectDir));
   if (found.length === 0) return null;
 
-  // A multi-part project can hold several models with different designers. When an edit
-  // triggered this, that edit is what the user just decided, so those rows are read first.
-  const priority = priorityIds instanceof Set ? priorityIds : new Set();
-  const models = found.slice().sort((a, b) => (priority.has(b.id) ? 1 : 0) - (priority.has(a.id) ? 1 : 0));
+  // A multi-part project can hold several models with different designers, so the order
+  // rows are read in decides where the project lands. Edits are passed in oldest first,
+  // and the most recent edit is what the user just decided, so it is read first.
+  const priority = Array.isArray(priorityIds) ? priorityIds : [];
+  const rank = new Map();
+  priority.forEach((id, index) => rank.set(id, index));
+  const models = found.slice().sort((a, b) => {
+    const rankA = rank.has(a.id) ? rank.get(a.id) : -1;
+    const rankB = rank.has(b.id) ? rank.get(b.id) : -1;
+    return rankB - rankA;
+  });
 
   const firstNonEmpty = (field) => {
     for (const model of models) {
@@ -9811,12 +9866,19 @@ async function reorganizeProjects(modelIds) {
     `).all(directoryScanPrefixSqlParam(settings.destinationRoot));
   }
 
+  // Keep the order the edits arrived in so the newest one still wins per project.
+  const orderOfEdit = new Map();
+  if (Array.isArray(modelIds)) modelIds.forEach((id, index) => orderOfEdit.set(id, index));
   const projectDirs = new Map();
   for (const row of rows) {
     const dir = projectDirForModel(row, settings.destinationRoot, patternDepth);
     if (!dir) continue;
-    if (!projectDirs.has(dir)) projectDirs.set(dir, new Set());
-    projectDirs.get(dir).add(row.id);
+    if (!projectDirs.has(dir)) projectDirs.set(dir, []);
+    projectDirs.get(dir).push(row.id);
+  }
+  for (const [dir, ids] of projectDirs) {
+    ids.sort((a, b) => (orderOfEdit.get(a) ?? -1) - (orderOfEdit.get(b) ?? -1));
+    projectDirs.set(dir, ids);
   }
 
   let moved = 0;
@@ -9838,7 +9900,14 @@ async function reorganizeProjects(modelIds) {
 
 let reorganizeTimer = null;
 let reorganizeInFlight = false;
-const reorganizePendingIds = new Set();
+/** Model ids waiting to be re-filed, oldest first. A repeat edit moves an id to the end. */
+let reorganizePendingIds = [];
+
+function queuePendingReorganizeId(id) {
+  const existing = reorganizePendingIds.indexOf(id);
+  if (existing !== -1) reorganizePendingIds.splice(existing, 1);
+  reorganizePendingIds.push(id);
+}
 
 /**
  * Queue a background re-file for the models that were just edited.
@@ -9851,18 +9920,18 @@ function scheduleProjectReorganize(modelIds) {
     const settings = getIngestSettings();
     if (!settings.enabled || !settings.destinationRoot) return;
     for (const id of modelIds) {
-      if (id != null) reorganizePendingIds.add(id);
+      if (id != null) queuePendingReorganizeId(id);
     }
     if (reorganizeTimer) clearTimeout(reorganizeTimer);
     reorganizeTimer = setTimeout(async () => {
       reorganizeTimer = null;
       if (reorganizeInFlight) {
         // Another sweep is running; re-arm so these ids are not dropped.
-        scheduleProjectReorganize(Array.from(reorganizePendingIds));
+        scheduleProjectReorganize(reorganizePendingIds.slice());
         return;
       }
-      const ids = Array.from(reorganizePendingIds);
-      reorganizePendingIds.clear();
+      const ids = reorganizePendingIds.slice();
+      reorganizePendingIds = [];
       reorganizeInFlight = true;
       try {
         await reorganizeProjects(ids);
@@ -9908,6 +9977,22 @@ const previewFolderPatternHandler = async (event, pattern) => {
   });
   return { withMetadata: filled.join('/'), withoutMetadata: bare.join('/') };
 };
+/**
+ * Re-register existing projects on demand. The same work runs once at startup; this
+ * exposes it so a library can be brought up to date without restarting.
+ */
+const backfillProjectsHandler = async () => {
+  try {
+    db.prepare("DELETE FROM settings WHERE key = 'ingestedProjectsBackfillComplete'").run();
+  } catch (error) {
+    // The flag may not exist yet; the backfill handles that.
+  }
+  const grouped = backfillIngestedProjects();
+  return { grouped };
+};
+ipcMain.handle('backfill-projects', backfillProjectsHandler);
+ipcHandlerRegistry.set('backfill-projects', backfillProjectsHandler);
+
 ipcMain.handle('preview-folder-pattern', previewFolderPatternHandler);
 ipcHandlerRegistry.set('preview-folder-pattern', previewFolderPatternHandler);
 

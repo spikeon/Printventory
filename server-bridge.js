@@ -516,6 +516,7 @@
     'applyIngestMetadata': 'apply-ingest-metadata',
     'restartIngestAutoRun': 'restart-ingest-auto-run',
     'reorganizeLibrary': 'reorganize-library',
+    'backfillProjects': 'backfill-projects',
     'previewFolderPattern': 'preview-folder-pattern',
     'getAppVersion': 'get-app-version',
     'checkCollectUsage': 'check-collect-usage',

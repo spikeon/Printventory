@@ -109,6 +109,7 @@ contextBridge.exposeInMainWorld('electron', {
   chooseIngestFolder: (kind) => ipcRenderer.invoke('choose-ingest-folder', kind),
   restartIngestAutoRun: () => ipcRenderer.invoke('restart-ingest-auto-run'),
   reorganizeLibrary: () => ipcRenderer.invoke('reorganize-library'),
+  backfillProjects: () => ipcRenderer.invoke('backfill-projects'),
   previewFolderPattern: (pattern) => ipcRenderer.invoke('preview-folder-pattern', pattern),
   onLibraryReorganized: (callback) => ipcRenderer.on('library-reorganized', (_event, payload) => callback(payload)),
   onIngestProgress: (callback) => ipcRenderer.on('ingest-progress', (_event, progress) => callback(progress)),
