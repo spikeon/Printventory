@@ -3528,6 +3528,14 @@ ipcMain.handle('scan-directory', async (event, directoryPath, options = {}) => {
 
             worker.terminate();
 
+            // Files that landed inside a project folder join that project's group, whether
+            // this scan indexed them for the first time or merely refreshed them.
+            try {
+              stampIngestedProjectFields(allFilePaths);
+            } catch (projectStampErr) {
+              console.error('Error applying project membership after scan:', projectStampErr);
+            }
+
             // STL Home scan with path metadata: set designer/parent from folder segments (from model level up) when enabled
             if (options.isStlHomeScan && Array.isArray(allFilePaths) && allFilePaths.length > 0) {
               try {
@@ -9258,6 +9266,26 @@ function sendIngestEvent(channel, payload) {
   }
 }
 
+/**
+ * LIKE prefix for "everything inside this folder".
+ *
+ * directoryScanPrefixSqlParam matches on the folder name alone, which also catches
+ * siblings that merely start with the same text — "CW2 - Multiscale" would match
+ * "CW2 - Multiscale - Core" as well. For a project that is wrong in both directions:
+ * it stamps files that belong to another project, and it would move them too.
+ */
+function projectPrefixSqlParam(projectPath) {
+  return normalizePath(projectPath).replace(/\/+$/, '').toLowerCase() + '/%';
+}
+
+/** True when `projectPath` is a real ancestor folder of `filePath`. */
+function isPathInsideProject(projectPath, filePath) {
+  if (!projectPath || !filePath) return false;
+  const parent = normalizePath(projectPath).replace(/\/+$/, '').toLowerCase();
+  const child = normalizePath(String(filePath).includes('::') ? String(filePath).split('::')[0] : filePath).toLowerCase();
+  return child.startsWith(parent + '/');
+}
+
 /** Cached list of ingested project folders, longest path first so nesting resolves. */
 let ingestedProjectsCache = null;
 
@@ -9365,6 +9393,27 @@ function backfillIngestedProjects() {
       .get('ingestedProjectsBackfillComplete')?.value;
     if (done === '1') return 0;
 
+    // Earlier builds matched a project by folder-name prefix, so a file could be
+    // recorded against a sibling whose name merely starts the same way. Repair those
+    // to the folder the file is actually in before registering anything.
+    const recorded = db.prepare(`
+      SELECT id, filePath, projectPath FROM models
+      WHERE projectPath IS NOT NULL AND projectPath != ''
+    `).all();
+    const repair = db.prepare('UPDATE models SET projectPath = ? WHERE id = ?');
+    let repaired = 0;
+    for (const row of recorded) {
+      if (isPathInsideProject(row.projectPath, row.filePath)) continue;
+      const onDisk = normalizePath(String(row.filePath).includes('::')
+        ? String(row.filePath).split('::')[0]
+        : row.filePath);
+      const folder = onDisk.slice(0, onDisk.lastIndexOf('/'));
+      if (!folder) continue;
+      repair.run(folder, row.id);
+      repaired++;
+    }
+    if (repaired > 0) console.log(`[Ingest] Repaired ${repaired} mis-recorded project path(s)`);
+
     const projects = db.prepare(`
       SELECT DISTINCT projectPath FROM models
       WHERE projectPath IS NOT NULL AND projectPath != ''
@@ -9433,7 +9482,7 @@ function applyIngestMetadataToLibrary(results) {
   for (const result of results) {
     if (!result || result.status !== 'moved' || !result.destination || !result.metadata) continue;
     const meta = result.metadata;
-    const prefixParam = directoryScanPrefixSqlParam(result.destination);
+    const prefixParam = projectPrefixSqlParam(result.destination);
     let rows = [];
     try {
       rows = selectStmt.all(prefixParam);
@@ -9531,7 +9580,7 @@ function stampProjectFieldsForKnownProjects(results) {
       const rows = db.prepare(`
         SELECT filePath FROM models
         WHERE REPLACE(LOWER(filePath), CHAR(92), '/') LIKE ?
-      `).all(directoryScanPrefixSqlParam(result.destination));
+      `).all(projectPrefixSqlParam(result.destination));
       stampIngestedProjectFields(rows.map((row) => row.filePath));
     } catch (error) {
       console.error('[Ingest] Could not stamp models under', result.destination, error);
@@ -9695,7 +9744,7 @@ function rewriteModelPaths(fromDir, toDir) {
   const rows = db.prepare(`
     SELECT id, filePath, bundleKey, bundleLabel, bundleKind FROM models
     WHERE REPLACE(LOWER(filePath), CHAR(92), '/') LIKE ?
-  `).all(directoryScanPrefixSqlParam(fromDir));
+  `).all(projectPrefixSqlParam(fromDir));
   const update = db.prepare(`
     UPDATE models SET filePath = ?, projectPath = ?, bundleKey = ?, bundleLabel = ?, bundleKind = ?
     WHERE id = ?
@@ -9733,7 +9782,7 @@ async function reorganizeOneProject(projectDir, settings, priorityIds) {
   const found = db.prepare(`
     SELECT id, filePath, designer, license, parentModel, source, projectPath FROM models
     WHERE REPLACE(LOWER(filePath), CHAR(92), '/') LIKE ?
-  `).all(directoryScanPrefixSqlParam(projectDir));
+  `).all(projectPrefixSqlParam(projectDir));
   if (found.length === 0) return null;
 
   // A multi-part project can hold several models with different designers, so the order
@@ -9866,7 +9915,7 @@ async function reorganizeProjects(modelIds) {
     rows = db.prepare(`
       SELECT id, filePath, projectPath FROM models
       WHERE REPLACE(LOWER(filePath), CHAR(92), '/') LIKE ?
-    `).all(directoryScanPrefixSqlParam(settings.destinationRoot));
+    `).all(projectPrefixSqlParam(settings.destinationRoot));
   }
 
   // Keep the order the edits arrived in so the newest one still wins per project.

@@ -291,6 +291,40 @@ test.describe('Active file management', () => {
     for (const kind of kinds) expect(kind).toBe('folder');
   });
 
+  test('a project does not swallow a sibling whose name starts the same way', async () => {
+    // "Widget" must not claim files from "Widget Extras": matching on the folder name
+    // alone would, and did, put another project's files in the wrong group.
+    const widget = path.join(library, 'Uncategorized', 'Sibling Test', 'Widget');
+    const extras = path.join(library, 'Uncategorized', 'Sibling Test', 'Widget Extras');
+    fs.mkdirSync(widget, { recursive: true });
+    fs.mkdirSync(extras, { recursive: true });
+    fs.writeFileSync(path.join(widget, 'a.stl'), 'solid a\nendsolid a\n');
+    fs.writeFileSync(path.join(widget, 'b.stl'), 'solid b\nendsolid b\n');
+    fs.writeFileSync(path.join(extras, 'c.stl'), 'solid c\nendsolid c\n');
+
+    await window.evaluate(async (root) => window.electron.scanDirectory(root, {}), library);
+    await window.waitForTimeout(1500);
+
+    const result = await window.evaluate(async ({ widgetDir, extrasDir }) => {
+      await window.electron.applyIngestMetadata([
+        { status: 'moved', destination: widgetDir, metadata: { designer: 'Sibling Co', model: 'Widget' } }
+      ]);
+      const models = await window.electron.getAllModels();
+      const inWidget = models.filter((m) => m.filePath.replace(/\\/g, '/').includes('/Widget/'));
+      const inExtras = models.filter((m) => m.filePath.replace(/\\/g, '/').includes('/Widget Extras/'));
+      return {
+        widgetLabels: inWidget.map((m) => m.bundleLabel),
+        extrasDesigners: inExtras.map((m) => m.designer),
+        extrasLabels: inExtras.map((m) => m.bundleLabel)
+      };
+    }, { widgetDir: widget, extrasDir: extras });
+
+    expect(result.widgetLabels).toEqual(['Widget', 'Widget']);
+    // The sibling keeps its own identity: no designer and no group from its neighbour.
+    expect(result.extrasDesigners).toEqual([null]);
+    expect(result.extrasLabels).toEqual([null]);
+  });
+
   test('re-files a project when metadata that feeds the pattern changes', async () => {
     const before = path.join(library, 'Uncategorized', 'CinderWing3D', 'Articulated Dragon');
     expect(fs.existsSync(before)).toBe(true);
