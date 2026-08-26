@@ -266,6 +266,9 @@ library afterwards.
 - A designer is only inferred from a name when the name states one (`Model by
   Designer`). Ambiguous names are left to the pattern's fallback rather than guessed
   at.
+- In a multi-part project whose models disagree (different designers on different
+  parts), the model you just edited decides where the project goes. The other models'
+  metadata is left exactly as it is — nothing is silently rewritten.
 - Each project is independent: one corrupt archive is reported and skipped, and the
   rest of the queue still runs.
 - The ingestion folder and library folder may not contain one another.

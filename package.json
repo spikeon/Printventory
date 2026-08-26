@@ -29,6 +29,7 @@
     "test": "playwright test",
     "test:bundle": "node bundle-keys.test.js",
     "test:ingest": "node ingest.test.js",
+    "test:afm": "playwright test active-file-management.spec.js",
     "test:full": "playwright test full-app-e2e.spec.js",
     "test:dedup-stress": "node tests/dedup-stress-test.js"
   },

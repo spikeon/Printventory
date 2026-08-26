@@ -11,6 +11,7 @@ All notable changes contributed via pull request are documented in this file.
 - Configurable folder pattern with fallbacks, e.g. `/(%category%|Uncategorized)/(%author%|Unknown)/%name%/` — `%token%` inserts metadata, `(a|b)` picks the first option with a value, and empty levels are dropped. Tokens: `%author%`, `%name%`, `%category%`, `%license%`, `%parent%`, `%source%`.
 - The library follows metadata edits: changing a model's designer, tags, licence or parent model silently re-files that project in the background, and changing the pattern re-files the whole library. Folders left empty by a move are removed.
 - Preview (dry run) shows exactly where every item would go before anything is moved.
+- In a multi-part project whose models carry different metadata, the model you just edited decides the destination; the other models are left untouched.
 - Optional unattended ingestion on a timer, and `INGEST_DIR` support for Docker deployments.
 
 ## [2.2.1] - 2026-08-21

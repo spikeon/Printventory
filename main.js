@@ -9317,8 +9317,11 @@ ipcHandlerRegistry.set('apply-ingest-metadata', applyIngestMetadataHandler);
 
 // Directory picker for the ingestion dialog. Server mode has no native dialog, so
 // the renderer keeps its text inputs editable there instead of calling this.
-ipcMain.handle('choose-ingest-folder', async (event) => {
-  const testPath = process.env.PRINTVENTORY_TEST_INGEST_PATH;
+ipcMain.handle('choose-ingest-folder', async (event, kind) => {
+  // Test mode: fixed paths so the UI can be driven without a native dialog.
+  const testPath = kind === 'library'
+    ? process.env.PRINTVENTORY_TEST_LIBRARY_PATH
+    : process.env.PRINTVENTORY_TEST_INGEST_PATH;
   if (testPath && typeof testPath === 'string') return testPath;
   const parentWindow = BrowserWindow.fromWebContents(event.sender) || mainWindow;
   const result = await dialog.showOpenDialog(parentWindow, { properties: ['openDirectory', 'createDirectory'] });
@@ -9471,15 +9474,20 @@ function rewriteModelPaths(fromDir, toDir) {
  * Move one project folder to where the pattern now says it belongs.
  * Returns the new path, or null when nothing needed to happen.
  */
-async function reorganizeOneProject(projectDir, settings) {
+async function reorganizeOneProject(projectDir, settings, priorityIds) {
   const root = settings.destinationRoot;
   if (!fs.existsSync(projectDir)) return null;
 
-  const models = db.prepare(`
+  const found = db.prepare(`
     SELECT id, filePath, designer, license, parentModel, source, projectPath FROM models
     WHERE REPLACE(LOWER(filePath), CHAR(92), '/') LIKE ?
   `).all(directoryScanPrefixSqlParam(projectDir));
-  if (models.length === 0) return null;
+  if (found.length === 0) return null;
+
+  // A multi-part project can hold several models with different designers. When an edit
+  // triggered this, that edit is what the user just decided, so those rows are read first.
+  const priority = priorityIds instanceof Set ? priorityIds : new Set();
+  const models = found.slice().sort((a, b) => (priority.has(b.id) ? 1 : 0) - (priority.has(a.id) ? 1 : 0));
 
   const firstNonEmpty = (field) => {
     for (const model of models) {
@@ -9600,17 +9608,19 @@ async function reorganizeProjects(modelIds) {
     `).all(directoryScanPrefixSqlParam(settings.destinationRoot));
   }
 
-  const projectDirs = new Set();
+  const projectDirs = new Map();
   for (const row of rows) {
     const dir = projectDirForModel(row, settings.destinationRoot, patternDepth);
-    if (dir) projectDirs.add(dir);
+    if (!dir) continue;
+    if (!projectDirs.has(dir)) projectDirs.set(dir, new Set());
+    projectDirs.get(dir).add(row.id);
   }
 
   let moved = 0;
   const movedProjects = [];
-  for (const dir of projectDirs) {
+  for (const [dir, editedIds] of projectDirs) {
     try {
-      const target = await reorganizeOneProject(dir, settings);
+      const target = await reorganizeOneProject(dir, settings, editedIds);
       if (target) {
         moved++;
         movedProjects.push({ from: dir, to: target });

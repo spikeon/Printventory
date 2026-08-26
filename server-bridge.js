@@ -708,7 +708,7 @@
   };
 
   // Server mode has no native folder picker; the dialog keeps its inputs editable instead.
-  window.electron.chooseIngestFolder = function() {
+  window.electron.chooseIngestFolder = function(kind) {
     return Promise.resolve(null);
   };
   

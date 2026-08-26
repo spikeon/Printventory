@@ -106,7 +106,7 @@ contextBridge.exposeInMainWorld('electron', {
   getIngestSettings: () => ipcRenderer.invoke('get-ingest-settings'),
   runIngest: (options) => ipcRenderer.invoke('run-ingest', options || {}),
   applyIngestMetadata: (results) => ipcRenderer.invoke('apply-ingest-metadata', results),
-  chooseIngestFolder: () => ipcRenderer.invoke('choose-ingest-folder'),
+  chooseIngestFolder: (kind) => ipcRenderer.invoke('choose-ingest-folder', kind),
   restartIngestAutoRun: () => ipcRenderer.invoke('restart-ingest-auto-run'),
   reorganizeLibrary: () => ipcRenderer.invoke('reorganize-library'),
   previewFolderPattern: (pattern) => ipcRenderer.invoke('preview-folder-pattern', pattern),

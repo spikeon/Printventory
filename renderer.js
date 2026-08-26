@@ -5103,16 +5103,16 @@ function afmBindDialogOnce() {
 
   afmEl('afm-enabled')?.addEventListener('change', updateActiveFileManagementGrayed);
 
-  const pickFolder = async (inputId) => {
+  const pickFolder = async (inputId, kind) => {
     if (typeof window.electron.chooseIngestFolder !== 'function') return;
-    const chosen = await window.electron.chooseIngestFolder();
+    const chosen = await window.electron.chooseIngestFolder(kind);
     if (chosen) {
       const input = afmEl(inputId);
       if (input) input.value = chosen;
     }
   };
-  afmEl('afm-choose-ingest')?.addEventListener('click', () => pickFolder('afm-ingest-directory'));
-  afmEl('afm-choose-destination')?.addEventListener('click', () => pickFolder('afm-destination-root'));
+  afmEl('afm-choose-ingest')?.addEventListener('click', () => pickFolder('afm-ingest-directory', 'ingest'));
+  afmEl('afm-choose-destination')?.addEventListener('click', () => pickFolder('afm-destination-root', 'library'));
   afmEl('afm-clear-ingest')?.addEventListener('click', () => {
     const input = afmEl('afm-ingest-directory');
     if (input) input.value = '';
