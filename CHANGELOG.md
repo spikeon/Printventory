@@ -4,6 +4,10 @@ All notable changes contributed via pull request are documented in this file.
 
 ## [Unreleased]
 
+### Changed
+
+- The welcome dialog is gone. It said "Welcome to Printventory!" over a single "Get Started!" button and did nothing but stand between a new user and the Quick Start guide, which now opens directly on a first run.
+
 ### Fixed
 
 - The Quick Start guide reopened every run. Dismissing the welcome dialog triggered two handlers: one in `guide.js` that checks whether the guide has already been seen, and one inline in `index.html` that showed it unconditionally. The inline handler now only closes the welcome dialog, leaving `guide.js` as the single place that decides.

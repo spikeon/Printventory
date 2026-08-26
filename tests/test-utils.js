@@ -73,18 +73,10 @@ function cleanTestArtifacts() {
 }
 
 /**
- * Dismiss onboarding: welcome dialog (Get Started!) and quick start guide (Close).
+ * Dismiss onboarding: on a first run that is the quick start guide (Close).
+ * The welcome dialog it used to follow has been removed.
  */
 async function dismissOnboarding(page) {
-  const getStarted = page.locator('button:has-text("Get Started!")');
-  try {
-    await getStarted.waitFor({ state: 'visible', timeout: 15000 });
-    await getStarted.click({ force: true });
-    await page.waitForTimeout(800);
-  } catch {
-    // Welcome not shown
-  }
-
   const guideClose = page.locator('#guide-close-button');
   try {
     await guideClose.waitFor({ state: 'visible', timeout: 10000 });

@@ -8,17 +8,6 @@
 const { test, expect, _electron: electron } = require('@playwright/test');
 const { getElectronLaunchOptions, cleanTestArtifacts, acceptTerms } = require('./test-utils');
 
-async function dismissWelcomeIfShown(window) {
-  const getStarted = window.locator('button:has-text("Get Started!")');
-  try {
-    await getStarted.waitFor({ state: 'visible', timeout: 15000 });
-    await getStarted.click({ force: true });
-    return true;
-  } catch {
-    return false;
-  }
-}
-
 async function guideIsOpen(window) {
   return window.evaluate(() => {
     const dialog = document.getElementById('quickstart-guide');
@@ -36,19 +25,20 @@ test.describe('Quick start guide', () => {
   });
 
   test('appears on the first run and not on the next one', async () => {
-    // First run: terms, welcome, then the guide.
+    // First run: accept the terms, and the guide opens straight away.
     let app = await electron.launch(getElectronLaunchOptions());
     let window = await app.firstWindow();
     await window.waitForLoadState('domcontentloaded');
     await acceptTerms(window);
 
-    const welcomeShown = await dismissWelcomeIfShown(window);
-    expect(welcomeShown, 'the welcome dialog should appear on a first run').toBe(true);
-
     await expect.poll(() => guideIsOpen(window), {
       timeout: 20000,
-      message: 'the guide should open once the welcome dialog is dismissed'
+      message: 'the guide should open on a first run'
     }).toBe(true);
+
+    // The welcome dialog it used to follow is gone for good.
+    expect(await window.locator('#welcome-message').count()).toBe(0);
+    expect(await window.locator('button:has-text("Get Started!")').count()).toBe(0);
 
     await window.evaluate(() => document.getElementById('quickstart-guide')?.close());
     await expect

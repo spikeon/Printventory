@@ -4719,13 +4719,14 @@ async function checkTermsOfService() {
           // Small delay to ensure dialog closes before showing welcome
           await new Promise(resolve => setTimeout(resolve, 200));
           
-          // Show welcome dialog if this is the first run
+          // First run: open the Quick Start guide directly. There is no welcome dialog —
+          // it said "Welcome to Printventory!" and offered one button, so it only stood
+          // between the user and the guide.
           const hasRunBefore = await window.electron.getSetting('hasRunBefore');
           if (!hasRunBefore) {
-            const welcomeDialog = document.getElementById('welcome-message');
-            if (welcomeDialog) {
-              welcomeDialog.showModal();
-              await window.electron.saveSetting('hasRunBefore', 'true');
+            await window.electron.saveSetting('hasRunBefore', 'true');
+            if (typeof window.showQuickStartGuideOnce === 'function') {
+              await window.showQuickStartGuideOnce();
             }
           }
           
@@ -6226,13 +6227,12 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
   }
 
-  // Show the welcome dialog if this is the first run
+  // First run: open the Quick Start guide straight away.
   if (!hasRunBeforeVal) {
-    const welcomeDialog = document.getElementById('welcome-message');
-    if (welcomeDialog) {
-      welcomeDialog.showModal();
-    }
     await window.electron.saveSetting('hasRunBefore', 'true');
+    if (typeof window.showQuickStartGuideOnce === 'function') {
+      await window.showQuickStartGuideOnce();
+    }
   }
 
   // Load saved grid view preference
@@ -6398,7 +6398,6 @@ document.addEventListener('DOMContentLoaded', async () => {
   const addTagButton = document.getElementById('add-tag-button');
   const licenseSelect = document.getElementById('license-select');
   const newDesignerDialog = document.getElementById('new-designer-dialog');
-  const welcomeDialog = document.getElementById('welcome-message');
 
   // Initialize license filter
   if (licenseSelect) {
@@ -6808,11 +6807,6 @@ document.addEventListener('DOMContentLoaded', async () => {
     uiThemeSelect.value = savedTheme;
   }
   applyThemeColors(savedTheme);
-
-  // Add dismiss button handler
-  document.getElementById('dismiss-welcome')?.addEventListener('click', () => {
-    welcomeDialog.close();
-  });
 
   // Notes modal handlers
   const notesModal = document.getElementById('notes-modal-dialog');

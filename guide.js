@@ -277,13 +277,8 @@ document.addEventListener("DOMContentLoaded", () => {
   }
   window.showQuickStartGuideOnce = showQuickStartGuideOnce;
 
-  // After the welcome dialog is dismissed, show the guide — but only ever once.
-  const dismissWelcomeButton = document.getElementById("dismiss-welcome");
-  if (dismissWelcomeButton) {
-    dismissWelcomeButton.addEventListener("click", () => {
-      showQuickStartGuideOnce();
-    });
-  }
+  // The guide is opened on a first run by renderer.js, which calls
+  // showQuickStartGuideOnce() directly. There is no welcome dialog to wait for.
 });
 
 // Export the showGuide function so it can be called from other files
