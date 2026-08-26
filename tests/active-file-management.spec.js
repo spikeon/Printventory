@@ -275,6 +275,22 @@ test.describe('Active file management', () => {
     for (const kind of grouped) expect(kind).toBe('folder');
   });
 
+  test('rescanning the library does not dissolve a project group', async () => {
+    // Bundles are derived only for ZIP members, so a rescan derives "nothing" for an
+    // ordinary file. That must not be mistaken for "this file has no bundle".
+    await window.evaluate(async (root) => window.electron.scanDirectory(root, {}), library);
+    await window.waitForTimeout(1500);
+
+    const kinds = await window.evaluate(async () => {
+      const models = await window.electron.getAllModels();
+      return models
+        .filter((m) => String(m.filePath).includes('Articulated Dragon'))
+        .map((m) => m.bundleKind);
+    });
+    expect(kinds.length).toBeGreaterThan(1);
+    for (const kind of kinds) expect(kind).toBe('folder');
+  });
+
   test('re-files a project when metadata that feeds the pattern changes', async () => {
     const before = path.join(library, 'Uncategorized', 'CinderWing3D', 'Articulated Dragon');
     expect(fs.existsSync(before)).toBe(true);

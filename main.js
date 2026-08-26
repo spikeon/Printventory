@@ -3448,9 +3448,12 @@ ipcMain.handle('scan-directory', async (event, directoryPath, options = {}) => {
               SET hash = COALESCE(NULLIF(?, ''), hash),
                   size = ?,
                   modifiedDate = ?,
-                  bundleKey = ?,
-                  bundleLabel = ?,
-                  bundleKind = ?
+                  -- Bundles are only derived for ZIP members, so a non-zip file derives to
+                  -- empty. Overwriting on that would erase the folder bundle an ingested
+                  -- project carries, every time the library is rescanned.
+                  bundleKey = COALESCE(NULLIF(?, ''), bundleKey),
+                  bundleLabel = COALESCE(NULLIF(?, ''), bundleLabel),
+                  bundleKind = COALESCE(NULLIF(?, ''), bundleKind)
               WHERE filePath = ?
             `);
             
@@ -11935,9 +11938,11 @@ async function saveModel(modelData) {
             license = ?,
             rating = ?,
             favorite = ?,
-            bundleKey = ?,
-            bundleLabel = ?,
-            bundleKind = ?,
+            -- Keep an ingested project's folder bundle: it cannot be derived from the
+            -- path, so a derived-empty value means "unchanged", not "no bundle".
+            bundleKey = COALESCE(NULLIF(?, ''), bundleKey),
+            bundleLabel = COALESCE(NULLIF(?, ''), bundleLabel),
+            bundleKind = COALESCE(NULLIF(?, ''), bundleKind),
             isNew = CASE WHEN ? THEN 0 ELSE isNew END
           WHERE id = ?
         `);
