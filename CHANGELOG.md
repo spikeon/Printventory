@@ -10,6 +10,7 @@ All notable changes contributed via pull request are documented in this file.
 
 ### Fixed
 
+- STEP and IGES models timed out while their thumbnail was being generated. The renderer allowed any model 30 seconds to load, which suits a mesh but not a CAD assembly that has to be tessellated first — those failed every time and were retried on every subsequent "generate missing" run. CAD formats now get five minutes; meshes are unchanged.
 - The Blender file type only matched `.blender`, which almost nothing uses; Blender writes `.blend`. Both extensions are now covered, so enabling Blender actually finds Blender files.
 - A STEP file's exporter was accepted as its designer. Some CAD packages write their own name into the author or organization field, and a real import filed 217 models under a designer called "ST-DEVELOPER v15.2". Values that name software or carry a version number are now rejected, falling through to the organization and then to no designer at all.
 - Opening a project group showed a second, identical group card beside it instead of the project's files. The parts a group revealed were run through grouping again, and since ingestion records the project name as every part's parent model, they immediately reassembled into a parent-model group next to the bundle they had just come out of. A model revealed by expanding a group is now left alone.

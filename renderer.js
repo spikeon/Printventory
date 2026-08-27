@@ -15010,8 +15010,14 @@ async function renderModelToPNG(filePath, container, existingThumbnail, options 
       throw new Error('loadModel function is not available.');
     }
 
-    // Add a timeout to prevent hanging indefinitely (e.g. on network shares or parsing errors)
-    const timeoutMs = 30000; // 30 seconds should be enough even for large models
+    // Add a timeout to prevent hanging indefinitely (e.g. on network shares or parsing errors).
+    // CAD formats get longer: STEP and IGES describe surfaces, so they must be tessellated
+    // before anything can be drawn, and a large assembly takes minutes rather than seconds.
+    // At 30s those models failed every time and were retried on every "generate missing" run.
+    const pathForTimeout = filePath.includes('::') ? (filePath.split('::')[1] || '') : filePath;
+    const isCadFile = typeof window.isCadBrepExtension === 'function'
+      && window.isCadBrepExtension(pathForTimeout.split('.').pop());
+    const timeoutMs = isCadFile ? 300000 : 30000;
     let timeoutId;
     const timeoutPromise = new Promise((_, reject) => {
       timeoutId = setTimeout(() => reject(new Error(`Loading model timed out after ${timeoutMs}ms`)), timeoutMs);
