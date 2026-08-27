@@ -24,6 +24,27 @@ const PLACEHOLDER_VALUES = new Set([
   'open cascade shape model', 'shape model', 'untitled', 'unnamed', 'default'
 ]);
 
+/**
+ * CAD packages and their version strings, which some exporters write into the author
+ * or organization field. "ST-DEVELOPER v15.2" is a preprocessor, not a person, and
+ * taking it as a designer files hundreds of models under the name of a tool.
+ */
+const EXPORTER_PATTERNS = [
+  /^st[-_ ]?developer/i,
+  /open\s*cascade/i,
+  /\bstep\s+(processor|translator|exporter)\b/i,
+  /^(solidworks|autodesk|fusion\s*360|onshape|freecad|catia|siemens|creo|inventor|rhino|sketchup|blender|ptc)\b/i,
+  /^v?\d+(\.\d+)+$/,                       // "V3.6", "15.2.1"
+  /\bv\d+(\.\d+)+\s*$/i                   // "Something v15.2"
+];
+
+/** True when a value names the software that wrote the file rather than its author. */
+function looksLikeExporter(value) {
+  const text = String(value == null ? '' : value).trim();
+  if (!text) return false;
+  return EXPORTER_PATTERNS.some((pattern) => pattern.test(text));
+}
+
 function isMeaningful(value) {
   if (value == null) return false;
   const trimmed = String(value).trim();
@@ -196,9 +217,8 @@ function parseStepHeader(text) {
 function stepMetadataToModelFields(header) {
   const fields = { designer: null, notes: null };
   if (!header) return fields;
-  const designer = isMeaningful(header.author)
-    ? header.author
-    : (isMeaningful(header.organization) ? header.organization : null);
+  const candidates = [header.author, header.organization];
+  const designer = candidates.find((value) => isMeaningful(value) && !looksLikeExporter(value));
   if (designer) fields.designer = designer;
   return fields;
 }
@@ -216,6 +236,7 @@ async function extractStepMetadata(filePath, readChunk) {
 module.exports = {
   HEADER_READ_BYTES,
   isMeaningful,
+  looksLikeExporter,
   decodeStepString,
   splitStepParameters,
   readStepValue,

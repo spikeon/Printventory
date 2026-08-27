@@ -10,6 +10,7 @@ All notable changes contributed via pull request are documented in this file.
 
 ### Fixed
 
+- A STEP file's exporter was accepted as its designer. Some CAD packages write their own name into the author or organization field, and a real import filed 217 models under a designer called "ST-DEVELOPER v15.2". Values that name software or carry a version number are now rejected, falling through to the organization and then to no designer at all.
 - Opening a project group showed a second, identical group card beside it instead of the project's files. The parts a group revealed were run through grouping again, and since ingestion records the project name as every part's parent model, they immediately reassembled into a parent-model group next to the bundle they had just come out of. A model revealed by expanding a group is now left alone.
 - The Quick Start guide reopened every run. Dismissing the welcome dialog triggered two handlers: one in `guide.js` that checks whether the guide has already been seen, and one inline in `index.html` that showed it unconditionally. The inline handler now only closes the welcome dialog, leaving `guide.js` as the single place that decides.
 

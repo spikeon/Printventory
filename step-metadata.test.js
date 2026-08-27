@@ -12,6 +12,7 @@ const path = require('path');
 
 const {
   isMeaningful,
+  looksLikeExporter,
   decodeStepString,
   splitStepParameters,
   readStepValue,
@@ -129,6 +130,29 @@ test('a header with no FILE_NAME yields nothing rather than throwing', () => {
   assert.strictEqual(header.author, null);
   assert.strictEqual(header.name, null);
   assert.deepStrictEqual(stepMetadataToModelFields(header), { designer: null, notes: null });
+});
+
+test('exporter and version strings are not people', () => {
+  // A real library filed 217 models under "ST-DEVELOPER v15.2" before this existed.
+  assert.strictEqual(looksLikeExporter('ST-DEVELOPER v15.2'), true);
+  assert.strictEqual(looksLikeExporter('Open CASCADE STEP processor 7.8'), true);
+  assert.strictEqual(looksLikeExporter('Autodesk Fusion 360'), true);
+  assert.strictEqual(looksLikeExporter('V3.6'), true);
+  // Names that merely look technical are still names.
+  assert.strictEqual(looksLikeExporter('CinderWing3D'), false);
+  assert.strictEqual(looksLikeExporter('V3 Precision'), false);
+  assert.strictEqual(looksLikeExporter('Printventory Tests'), false);
+});
+
+test('an exporter in the author field falls through to the organization', () => {
+  assert.strictEqual(
+    stepMetadataToModelFields({ author: 'ST-DEVELOPER v15.2', organization: 'Acme Design' }).designer,
+    'Acme Design'
+  );
+  assert.strictEqual(
+    stepMetadataToModelFields({ author: 'ST-DEVELOPER v15.2', organization: 'Open CASCADE' }).designer,
+    null
+  );
 });
 
 test('stepMetadataToModelFields prefers the author, then the organization', () => {
