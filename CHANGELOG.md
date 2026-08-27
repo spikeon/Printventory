@@ -10,6 +10,7 @@ All notable changes contributed via pull request are documented in this file.
 
 ### Fixed
 
+- With `%category%` in the folder pattern, any tag could decide where a project lived simply by sorting first, so tagging a model — by hand or with AI — silently re-filed it. Categories are now an explicit set (the `categoryTags` setting); only a tag from that set fills `%category%`. Libraries with no category set keep the old first-tag behaviour.
 - STEP and IGES models timed out while their thumbnail was being generated. The renderer allowed any model 30 seconds to load, which suits a mesh but not a CAD assembly that has to be tessellated first — those failed every time and were retried on every subsequent "generate missing" run. CAD formats now get five minutes; meshes are unchanged.
 - The Blender file type only matched `.blender`, which almost nothing uses; Blender writes `.blend`. Both extensions are now covered, so enabling Blender actually finds Blender files.
 - A STEP file's exporter was accepted as its designer. Some CAD packages write their own name into the author or organization field, and a real import filed 217 models under a designer called "ST-DEVELOPER v15.2". Values that name software or carry a version number are now rejected, falling through to the organization and then to no designer at all.

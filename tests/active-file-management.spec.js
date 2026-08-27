@@ -367,6 +367,42 @@ test.describe('Active file management', () => {
     await expect(window.locator('.parent-model-group')).toHaveCount(1);
   });
 
+  test('only a category tag decides the folder, not any tag', async () => {
+    // Once %category% is in the pattern, tagging would otherwise move files: a tag that
+    // sorted first won the category slot, so AI-tagging a library re-filed all of it.
+    await window.evaluate(async () => {
+      await window.electron.saveSetting('ingestFolderPattern', '/(%category%|Uncategorized)/%name%/');
+      await window.electron.saveSetting('categoryTags', JSON.stringify(['Gadgets']));
+    });
+
+    const filePath = await window.evaluate(async () => {
+      const models = await window.electron.getAllModels();
+      const model = models.find((m) => String(m.filePath).includes('Articulated Dragon'));
+      // "Aardvark" sorts first; only "Gadgets" is a category.
+      await window.electron.saveModel({ ...model, tags: ['Aardvark', 'Gadgets'] });
+      return model.filePath;
+    });
+    expect(filePath).toBeTruthy();
+
+    await expect
+      .poll(() => (fs.existsSync(path.join(library, 'Gadgets')) ? 'filed'
+        : (fs.existsSync(path.join(library, 'Aardvark')) ? 'wrong tag won' : 'waiting')),
+      { timeout: 60000, message: 'the category tag should decide the folder' })
+      .toBe('filed');
+
+    expect(fs.existsSync(path.join(library, 'Aardvark'))).toBe(false);
+
+    // Put the pattern back so the next test sees the arrangement it expects.
+    await window.evaluate(async () => {
+      await window.electron.saveSetting('ingestFolderPattern', '/(%category%|Uncategorized)/(%author%|Unknown)/%name%/');
+      await window.electron.saveSetting('categoryTags', '');
+      const models = await window.electron.getAllModels();
+      const model = models.find((m) => String(m.filePath).includes('Articulated Dragon'));
+      if (model) await window.electron.saveModel({ ...model, tags: [] });
+    });
+    await window.waitForTimeout(3000);
+  });
+
   test('re-files a project when metadata that feeds the pattern changes', async () => {
     const before = path.join(library, 'Uncategorized', 'CinderWing3D', 'Articulated Dragon');
     expect(fs.existsSync(before)).toBe(true);

@@ -9685,15 +9685,43 @@ function samePath(a, b) {
 }
 
 /** The first tag on a model, used for the %category% token. */
+/**
+ * Tags that name a category, and so may stand in for %category% in the folder pattern.
+ *
+ * Any tag could once win that slot simply by sorting first, which meant tagging a model
+ * — by hand or with AI — silently re-filed its project under the new tag. A category is
+ * now an explicit set: only these tags decide where a project lives.
+ */
+function getCategoryTagNames() {
+  try {
+    const row = db.prepare('SELECT value FROM settings WHERE key = ?').get('categoryTags');
+    if (!row || !row.value) return null;
+    const names = JSON.parse(row.value);
+    if (!Array.isArray(names) || names.length === 0) return null;
+    return new Set(names.map((n) => String(n).trim().toLowerCase()));
+  } catch (error) {
+    return null;
+  }
+}
+
+/**
+ * The tag that stands for a model's category.
+ * With a category set defined, only a tag from it counts; otherwise the first tag wins,
+ * which is the old behaviour and still right for a library that has no categories.
+ */
 function firstTagForModel(modelId) {
   try {
-    const row = db.prepare(`
+    const rows = db.prepare(`
       SELECT tags.name AS name FROM model_tags
       JOIN tags ON tags.id = model_tags.tag_id
       WHERE model_tags.model_id = ?
-      ORDER BY tags.name LIMIT 1
-    `).get(modelId);
-    return row && row.name ? row.name : '';
+      ORDER BY tags.name
+    `).all(modelId);
+    if (rows.length === 0) return '';
+    const categories = getCategoryTagNames();
+    if (!categories) return rows[0].name || '';
+    const match = rows.find((row) => categories.has(String(row.name || '').trim().toLowerCase()));
+    return match ? match.name : '';
   } catch (error) {
     return '';
   }
